@@ -1,0 +1,25 @@
+# Outputs (regenerate with the scripts)
+output/
+results/
+data/
+protease-quant-advisor/results/
+
+# Never commit run state, cached real data, raw/search files or libraries
+*.rds
+*.RData
+*.parquet
+*.speclib
+*.raw
+*.fasta
+*.fasta.gz
+*_Library.tsv*
+
+# R / editor / OS cruft
+.Rhistory
+.Rproj.user/
+*.Rproj
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+Rplots.pdf

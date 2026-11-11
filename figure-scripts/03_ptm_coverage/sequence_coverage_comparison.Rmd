@@ -1,0 +1,1880 @@
+---
+title: "DIA-NN Sequence Coverage Comparison — Protein Sequence Maps (3-Group)"
+author: "Mario M. Alba"
+subtitle: "Krakatoa 2, Mix 30 min, Trypsin 2 — Cleaned Protease Combinations"
+date: "`r format(Sys.time(), '%B %d, %Y')`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: hide
+    theme: flatly
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Sequence coverage and PTM maps (manuscript Fig 3B)
+
+Released as used for the manuscript: only file paths and this introduction were changed; the analysis
+code is untouched. Packages: see the `library()` calls below (several are loaded but unused).
+
+Paths come from environment variables (see the repository README): `TWO_PROTEASE_DATA` (the DIA-NN
+search results, MassIVE MSV000103457), `TWO_PROTEASE_FASTA` (UniProtKB human reviewed proteome) and
+`TWO_PROTEASE_OUT` (where figures and tables are written). Render with
+`Rscript -e 'rmarkdown::render("figure-scripts/03_ptm_coverage/sequence_coverage_comparison.Rmd")'`.
+
+```{r analysis}
+library(readxl)
+library(openxlsx)
+library(RColorBrewer)
+library(ggplot2)
+library(scales)
+library(gridExtra)
+library(ggthemes)
+library(tidyr)
+library(ggdendro)
+library(grid)
+library(ggrepel)
+library(ggpubr)
+library(tidyverse)
+library(dplyr)
+library(devtools)
+library(readr)
+library(PhosR)
+library(directPA)
+library(reshape2)
+library(stringr)
+library(writexl)
+library(broom)
+library(purrr)
+library(cowplot)
+library(pheatmap)
+library(clusterProfiler)
+library(org.Mm.eg.db)
+library(enrichplot)
+library(ReactomePA)
+library(rWikiPathways)
+library(gprofiler2)
+library(enrichR)
+library(kableExtra)
+library(forcats)
+library(officer)
+library(rvg)
+library(ComplexHeatmap)
+library(circlize)
+library(VennDiagram)
+library(ggVennDiagram)
+library(limpa)  # This also loads limma automatically
+library(AnnotationDbi)
+library(sva)
+library(limma)
+library(ggplot2)
+library(ggrepel)
+library(Cairo)
+
+# ============================================================================
+# DIA-NN SEQUENCE COVERAGE — PROTEIN SEQUENCE MAPS (3-GROUP VERSION)
+# Compares peptide coverage across 3 protease groups:
+#   Krakatoa 2, Mix 30 min, Trypsin 2
+# (Trypsin 1, Krakatoa 1, and Mix 20 min are EXCLUDED for cleaner visuals)
+# Builds union across 5 DIA-NN search strategies, then segregates by group.
+# Selects top proteins (>50% coverage in at least one group)
+# showing greatest coverage enhancement from mix vs single protease.
+# Includes PTM overlay on sequence maps.
+# Uses Gene names. Publication quality (Cell / Nature).
+#
+# Thematically follows:
+#   - DIA_NN_Result_Comparison.R
+#   - DIA_NN_Sequence_PTM_Extraction.R
+# ============================================================================
+
+suppressPackageStartupMessages({
+  library(data.table)
+  library(ggplot2)
+  library(Biostrings)
+  library(patchwork)
+  library(scales)
+  library(cowplot)
+})
+
+cat(strrep("=", 80), "\n")
+cat("DIA-NN SEQUENCE COVERAGE — PROTEIN SEQUENCE MAPS\n")
+cat(strrep("=", 80), "\n\n")
+
+
+# ============================================================================
+# 0. USER SETTINGS
+# ============================================================================
+
+base_dir <- Sys.getenv("TWO_PROTEASE_DATA", "data")
+
+# Coverage (Fig 3E) and the PTM lollipop (Fig 3D) are computed from the 6/5 "All Searches"
+# UNION of the two SEPARATE DIA-NN library searches (Krakatoa library + Trypsin library),
+# reconciling Fig 3D/E with Figs 1-3A/C which already use that union. Both searches contain
+# the SAME 324 raw files; a peptide/precursor or protein group counts as DETECTED in a
+# preparation group if it has non-zero, non-NA intensity in that group's columns in EITHER
+# search, and detections are unioned per group across the two searches. At the coverage
+# level this yields 1,493 protein groups quantified in BOTH Mix 30 and Trypsin 2 (368 gain
+# coverage with Mix, 12 lose, 1,113 unchanged), with A1BG (P04217) rising 63.0% -> 86.3%
+# (+23.2) as the showcase. (Supersedes the earlier single combined-library search, which
+# gave 1,667 / 358 / 21 / 1,288 and A1BG 63.6 -> 84.8.) Independently re-derived from the same matrices
+# (2026-09-27). Update this comment if the underlying searches are re-run.
+search_dirs <- c(
+  "Krakatoa_Library_Search" = file.path(base_dir, "Krakatoa_Library_Search"),
+  "Trypsin_Library_Search"  = file.path(base_dir, "Trypsin_Library_Search")
+)
+
+pg_file <- "report.pg_matrix.tsv"
+pr_file <- "report.pr_matrix.tsv"
+
+fasta_path <- Sys.getenv("TWO_PROTEASE_FASTA", "uniprotkb_Human_AND_reviewed_true_AND_m_2025_10_28.fasta")
+
+TOP_N_PROTEINS       <- 5
+MIN_COVERAGE_PCT     <- 50      # must reach >=50% in at least one group
+zero_as_na           <- TRUE
+PUB_DPI              <- 600
+
+timestamp <- format(Sys.time(), "%Y-%m-%d_%H%M%S")
+# Figures overwrite into one fixed folder (not a timestamped dir).
+out_dir   <- file.path(Sys.getenv("TWO_PROTEASE_OUT", "output"), "03_ptm_coverage", "SequenceCoverage")
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+
+cat("Base directory:   ", base_dir, "\n")
+cat("Output directory: ", out_dir, "\n")
+cat("FASTA:            ", fasta_path, "\n")
+cat("Top N proteins:   ", TOP_N_PROTEINS, "\n")
+cat("Min coverage:     ", MIN_COVERAGE_PCT, "%\n\n")
+
+GROUP_ORDER <- c("Krakatoa 2", "Mix 30 min", "Trypsin 2")
+
+group_colors <- c(
+  "Krakatoa 2"  = "#E8834A",
+  "Mix 30 min"  = "#2D8E5F",
+  "Trypsin 2"   = "#7B68C4"
+)
+
+# Curated UniMod ID -> name map = the WHITELIST for the Fig 3D lollipop (Fig2_Combined_PTM).
+# This variable gates BOTH PTM counting AND site/position mapping: extract_ptm_positions() only
+# emits a site whose UniMod ID is in names(UNIMOD_NAMES) (and not in EXCLUDE_UNIMOD_IDS), so the
+# lollipop legend can only contain mods drawn from this set.
+#
+# COMMON-BIOLOGICAL keep-list (PI decision): restricted to 10 common, biologically interpretable
+# chemistries. This DROPS the rarer/exotic open-search chemistries that the prior 20-ID display set
+# surfaced — specifically Amidine(141), Biotin(3), Cyano(438), Cysteinyl(312), Cytopiloyne(270),
+# DAET(178), Deoxy(447), Dethiomethyl(526), Didehydro(401), Diisopropylphosphate(362),
+# Phycoerythrobilin(388), Trioxidation(345) — in addition to the 12 search-artifact IDs already
+# removed by EXCLUDE_UNIMOD_IDS below. Only these 10 IDs may appear in the lollipop; each protein
+# panel shows whichever subset of the 10 is actually observed.
+UNIMOD_NAMES <- c(
+  "1"   = "Acetyl",
+  "21"  = "Phospho",
+  "34"  = "Methyl",
+  "36"  = "Dimethyl",
+  "37"  = "Trimethyl",
+  "24"  = "Propionamide",
+  "368" = "Cys->Dha",
+  "55"  = "Glutathione",
+  "122" = "Formyl",
+  "64"  = "Succinyl"
+)
+
+# ---- Artifact exclusion (12-ID search-artifact blacklist, matches PTM_Analysis.R) ----
+# Applied in extract_ptm_positions() as a redundant guard on top of the UNIMOD_NAMES whitelist;
+# none of the 10 whitelisted IDs are in this blacklist, so it has no effect on the lollipop but is
+# kept for defense in depth. The lollipop's real gate is the UNIMOD_NAMES keep-list above.
+# Excluded = Carbamidomethyl(4), Oxidation(35), Amidated(2), Deamidated(7), 385, Dehydrated(23),
+# Gln->pyro-Glu(28), Cation:Na(30), Carboxymethyl(6), Label:18O(2)(193), Sulfide(421), Carbamyl(5).
+EXCLUDE_UNIMOD_IDS <- c("4","35","2","7","385","23","28","30","6","193","421","5")
+
+# PTM marker system: color + shape dual encoding for unambiguous identification.
+# Keyed to the 10 COMMON-BIOLOGICAL whitelist names in UNIMOD_NAMES (above). Trimethyl and
+# Succinyl are newly featured by the keep-list, so they are added here with distinct color/shape.
+# Each whitelisted PTM gets a unique color; unmatched names fall back to grey/circle downstream.
+PTM_COLOR_PALETTE <- c(
+  "Acetyl"       = "#E64B35",   # vivid red
+  "Phospho"      = "#4DBBD5",   # teal
+  "Methyl"       = "#00A087",   # green
+  "Dimethyl"     = "#3C5488",   # navy
+  "Trimethyl"    = "#6A3D9A",   # purple
+  "Propionamide" = "#8491B4",   # slate blue
+  "Cys->Dha"     = "#A50026",   # dark red
+  "Glutathione"  = "#91D1C2",   # mint
+  "Formyl"       = "#F39B7F",   # salmon
+  "Succinyl"     = "#FF7F00"    # bright orange
+)
+
+# Shapes: fillable variants (21-25) that support both fill color AND stroke border
+PTM_SHAPE_MAP <- c(
+  "Acetyl" = 21, "Phospho" = 24, "Methyl" = 22, "Dimethyl" = 23,
+  "Trimethyl" = 25, "Propionamide" = 21, "Cys->Dha" = 25, "Glutathione" = 24,
+  "Formyl" = 23, "Succinyl" = 22
+)
+# 21=circle, 22=square, 23=diamond, 24=triangle-up, 25=triangle-down
+
+
+# ============================================================================
+# 1. PUBLICATION THEME (Cell / Nature — all titles centered)
+# ============================================================================
+
+pub_theme <- function(base_size = 11, strip_size = 11) {
+  theme_classic(base_size = base_size) +
+    theme(
+      text             = element_text(family = "sans", color = "black"),
+      plot.title       = element_text(face = "bold", color = "black", size = base_size + 3,
+                                      hjust = 0.5, margin = margin(b = 4)),
+      plot.subtitle    = element_text(color = "grey30", size = base_size + 0.5,
+                                      hjust = 0.5, margin = margin(b = 10)),
+      axis.title       = element_text(face = "bold", color = "black", size = base_size + 0.5),
+      axis.text        = element_text(color = "black", size = base_size),
+      legend.title     = element_text(face = "bold", color = "black", size = base_size + 0.5),
+      legend.text      = element_text(color = "black", size = base_size),
+      strip.text       = element_text(color = "black", face = "bold", size = strip_size),
+      axis.text.x      = element_text(angle = 0, hjust = 0.5),
+      axis.line        = element_line(color = "black", linewidth = 0.5),
+      axis.ticks       = element_line(color = "black", linewidth = 0.4),
+      axis.ticks.length = unit(0.15, "cm"),
+      panel.grid       = element_blank(),
+      strip.background = element_blank(),
+      legend.background = element_blank(),
+      legend.key        = element_rect(fill = "white", color = NA),
+      legend.key.size   = unit(0.45, "cm"),
+      legend.spacing.y  = unit(0.15, "cm"),
+      plot.margin       = margin(10, 10, 10, 10),
+      plot.background   = element_rect(fill = "white", color = NA),
+      panel.background  = element_rect(fill = "white", color = NA)
+    )
+}
+
+save_pub <- function(plot_obj, out_png, width, height, dpi = PUB_DPI) {
+  ggsave(out_png, plot_obj, width = width, height = height, dpi = dpi, units = "in", bg = "white")
+  out_pdf <- sub("\\.png$", ".pdf", out_png, ignore.case = TRUE)
+  ggsave(out_pdf, plot_obj, width = width, height = height, device = cairo_pdf, units = "in")
+}
+
+
+# ============================================================================
+# 2. CORE HELPER FUNCTIONS
+# ============================================================================
+
+cat(strrep("=", 80), "\n")
+cat("LOADING HELPER FUNCTIONS\n")
+cat(strrep("=", 80), "\n\n")
+
+sanitize_ids <- function(ids) {
+  ids <- as.character(ids); ids <- trimws(ids)
+  ids[ids %in% c("", "NA", "NaN")] <- NA_character_; ids
+}
+
+normalize_colname <- function(x) tolower(gsub("[^a-z0-9]+", "", x))
+
+is_non_sample_col <- function(colname) {
+  nrm <- normalize_colname(colname)
+  if (nrm %in% c("proteotypic", "nsequences", "nsequence", "nseq", "nseqs",
+                  "precursorcharge", "precursorchargeid", "qvalue", "pgqvalue",
+                  "pep", "pgpep", "libqvalue", "decoy", "decoyevidence",
+                  "rt", "rtstart", "rtstop", "ms1area", "ms1profilecorr")) return(TRUE)
+  FALSE
+}
+
+looks_like_sample_colname <- function(colname) {
+  cn <- as.character(colname)
+  grepl("\\.(raw|d|mzml)$", cn, ignore.case = TRUE) ||
+    grepl("^[A-Za-z]:\\\\", cn) || grepl("^[A-Za-z]:/", cn) ||
+    grepl("[/\\\\].*\\.(raw|d|mzml)$", cn, ignore.case = TRUE)
+}
+
+numeric_cols_only <- function(dt, exclude = character()) {
+  dt <- as.data.table(dt)
+  cols_all <- setdiff(names(dt), exclude)
+  cols_all <- cols_all[!vapply(cols_all, is_non_sample_col, logical(1))]
+  sample_like <- cols_all[vapply(cols_all, looks_like_sample_colname, logical(1))]
+  if (length(sample_like) > 0) return(sample_like)
+  keep <- character()
+  for (cname in cols_all) {
+    v <- suppressWarnings(as.numeric(dt[[cname]]))
+    if (sum(!is.na(v)) > 0) keep <- c(keep, cname)
+  }
+  unique(keep)
+}
+
+read_diann_matrix <- function(path, id_col_guess = NULL) {
+  dt <- fread(path, sep = "\t", header = TRUE, data.table = TRUE, showProgress = FALSE)
+  if (nrow(dt) == 0) stop("Empty file: ", path)
+  if (!is.null(id_col_guess) && id_col_guess %in% names(dt)) { id_col <- id_col_guess
+  } else {
+    candidates <- c("Protein.Group", "Genes", "Modified.Sequence",
+                     "ModifiedPeptideSequence", "Stripped.Sequence", names(dt)[1])
+    candidates <- candidates[candidates %in% names(dt)]
+    id_col <- candidates[1]
+  }
+  num_cols <- numeric_cols_only(dt, exclude = id_col)
+  for (cname in num_cols) dt[[cname]] <- suppressWarnings(as.numeric(dt[[cname]]))
+  list(dt = dt, id_col = id_col, num_cols = num_cols)
+}
+
+matrix_from_dt <- function(dt, id_col, num_cols, zero_as_na = TRUE) {
+  ids  <- sanitize_ids(dt[[id_col]]); keep <- !is.na(ids) & nzchar(ids)
+  dt   <- dt[keep]; ids <- ids[keep]
+  m <- as.matrix(dt[, ..num_cols]); mode(m) <- "numeric"
+  if (zero_as_na) m[m == 0] <- NA_real_
+  if (anyDuplicated(ids)) {
+    agg <- data.table(ID = ids)
+    for (j in seq_along(num_cols)) agg[[num_cols[j]]] <- m[, j]
+    agg <- agg[, lapply(.SD, function(x) if (all(is.na(x))) NA_real_ else sum(x, na.rm = TRUE)),
+               by = ID, .SDcols = num_cols]
+    m2 <- as.matrix(agg[, ..num_cols]); rownames(m2) <- agg[["ID"]]; colnames(m2) <- num_cols; return(m2)
+  }
+  rownames(m) <- ids; colnames(m) <- num_cols; m
+}
+
+# ── FASTA ──
+load_fasta_map <- function(fasta_file) {
+  if (!file.exists(fasta_file)) stop("Missing FASTA: ", fasta_file)
+  fa <- readAAStringSet(fasta_file); raw_names <- names(fa)
+  accessions <- sub("^[a-z]{2}\\|([^|]+)\\|.*$", "\\1", raw_names)
+  seqs <- as.character(fa); names(seqs) <- accessions
+  first_word <- sub("\\s.*", "", raw_names)
+  extra <- setdiff(first_word, accessions)
+  if (length(extra) > 0) { e <- seqs[match(extra, first_word)]; names(e) <- extra; seqs <- c(seqs, e[!is.na(e)]) }
+  seqs
+}
+
+extract_primary_accession <- function(pg_ids) {
+  vapply(strsplit(as.character(pg_ids), "[;,]"), function(x) {
+    x <- trimws(x); x <- x[nzchar(x)]
+    if (length(x) == 0) return(NA_character_); x[1]
+  }, character(1))
+}
+
+# ── Peptide helpers ──
+strip_modifications <- function(mod_seq) {
+  s <- gsub("\\(UniMod:\\d+\\)", "", mod_seq)
+  s <- gsub("\\([^)]*\\)", "", s)
+  s <- gsub("^[A-Z]?\\.|\\.?[A-Z]?$", "", s)
+  gsub("[^A-Z]", "", s)
+}
+
+find_peptide_positions <- function(pep, prot) {
+  if (is.na(pep) || is.na(prot) || !nzchar(pep) || !nzchar(prot)) return(integer(0))
+  starts <- gregexpr(pep, prot, fixed = TRUE)[[1]]
+  if (starts[1] == -1) return(integer(0)); as.integer(starts)
+}
+
+build_coverage_ranges <- function(peptides, protein_seq) {
+  if (length(peptides) == 0 || is.na(protein_seq) || !nzchar(protein_seq))
+    return(data.table(Start = integer(0), End = integer(0), PeptideSeq = character(0)))
+  rows <- list()
+  for (pep in unique(peptides)) {
+    stripped <- strip_modifications(pep); if (!nzchar(stripped)) next
+    starts <- find_peptide_positions(stripped, protein_seq); if (length(starts) == 0) next
+    pep_len <- nchar(stripped)
+    for (s in starts) rows[[length(rows) + 1]] <- data.table(Start = s, End = s + pep_len - 1L, PeptideSeq = stripped)
+  }
+  if (length(rows) == 0) return(data.table(Start = integer(0), End = integer(0), PeptideSeq = character(0)))
+  rbindlist(rows)
+}
+
+merge_ranges <- function(ranges_dt) {
+  if (nrow(ranges_dt) == 0) return(data.table(Start = integer(0), End = integer(0)))
+  ranges_dt <- ranges_dt[order(Start)]
+  merged <- list(); cs <- ranges_dt$Start[1]; ce <- ranges_dt$End[1]
+  for (r in seq_len(nrow(ranges_dt))) {
+    if (ranges_dt$Start[r] <= ce + 1L) { ce <- max(ce, ranges_dt$End[r]) }
+    else { merged[[length(merged) + 1]] <- data.table(Start = cs, End = ce); cs <- ranges_dt$Start[r]; ce <- ranges_dt$End[r] }
+  }
+  merged[[length(merged) + 1]] <- data.table(Start = cs, End = ce); rbindlist(merged)
+}
+
+# ── PTM extraction (same logic as DIA_NN_Sequence_PTM_Extraction.R) ──
+extract_unimod_ids <- function(mod_seq, exclude_ids = c("4")) {
+  if (is.na(mod_seq) || !nzchar(mod_seq)) return(character())
+  hits <- gregexpr("UniMod:\\s*([0-9]+)", mod_seq, perl = TRUE)
+  m <- regmatches(mod_seq, hits)[[1]]
+  if (length(m) == 0) return(character())
+  ids <- gsub(".*UniMod:\\s*([0-9]+).*", "\\1", m, perl = TRUE)
+  ids <- ids[nzchar(ids)]
+  ids[!(ids %in% as.character(exclude_ids))]
+}
+
+extract_ptm_positions <- function(mod_seq, protein_seq) {
+  if (is.na(mod_seq) || is.na(protein_seq) || !nzchar(mod_seq) || !nzchar(protein_seq)) return(data.table())
+  stripped <- strip_modifications(mod_seq)
+  prot_starts <- find_peptide_positions(stripped, protein_seq)
+  if (length(prot_starts) == 0) return(data.table())
+
+  # Walk through modified sequence finding (UniMod:XX) positions
+  results <- list()
+  aa_pos  <- 0L   # position in stripped peptide (1-based)
+  i       <- 1L
+  chars   <- strsplit(mod_seq, "")[[1]]
+  n       <- length(chars)
+
+  while (i <= n) {
+    ch <- chars[i]
+    if (ch == "(") {
+      # Extract content inside parentheses
+      j <- i + 1L
+      depth <- 1L
+      while (j <= n && depth > 0) { if (chars[j] == "(") depth <- depth + 1; if (chars[j] == ")") depth <- depth - 1; j <- j + 1L }
+      inner <- paste0(chars[(i+1):(j-2)], collapse = "")
+      uid_m <- regexpr("UniMod:\\s*([0-9]+)", inner, perl = TRUE)
+      if (uid_m[1] != -1) {
+        uid <- gsub(".*UniMod:\\s*([0-9]+).*", "\\1", regmatches(inner, uid_m), perl = TRUE)
+        if (uid %in% names(UNIMOD_NAMES) && !(uid %in% EXCLUDE_UNIMOD_IDS)) {
+          mod_name <- UNIMOD_NAMES[uid]
+          for (ps in prot_starts) {
+            results[[length(results) + 1]] <- data.table(
+              ProteinPos = ps + aa_pos - 1L, PeptidePos = aa_pos,
+              UniModID = uid, ModName = mod_name)
+          }
+        }
+      }
+      i <- j
+    } else if (grepl("[A-Z]", ch)) {
+      aa_pos <- aa_pos + 1L; i <- i + 1L
+    } else {
+      i <- i + 1L
+    }
+  }
+  if (length(results) == 0) return(data.table())
+  rbindlist(results)
+}
+
+# ── Grouping (same as DIA_NN_Result_Comparison.R) ──
+get_basename_noext <- function(x) {
+  x2 <- gsub("\\\\", "/", x); b <- basename(x2)
+  b <- sub("\\.raw$", "", b, ignore.case = TRUE)
+  b <- sub("\\.d$", "", b, ignore.case = TRUE)
+  b <- sub("\\.mzML$", "", b, ignore.case = TRUE); b
+}
+
+get_parent_folder <- function(x) {
+  x2 <- gsub("\\\\", "/", x); d <- dirname(x2)
+  if (is.na(d) || d == "." || d == "") return(NA_character_); basename(d)
+}
+
+extract_date_token <- function(x) {
+  nm <- get_basename_noext(x)
+  m <- regexpr("^\\d{6}(?=_)", nm, perl = TRUE)
+  if (m[1] != -1) return(regmatches(nm, m)); NA_character_
+}
+
+auto_guess_group <- function(sample_name) {
+  parent <- get_parent_folder(sample_name)
+  nm     <- get_basename_noext(sample_name)
+  dtok   <- extract_date_token(sample_name)
+  if (!is.na(parent) && grepl("20min", parent, ignore.case = TRUE) && grepl("mix", parent, ignore.case = TRUE)) return("Mix_20min")
+  if (grepl("_20min\\b", nm, ignore.case = TRUE) && grepl("_Mix_", nm, ignore.case = TRUE)) return("Mix_20min")
+  if (!is.na(parent) && grepl("30min", parent, ignore.case = TRUE) && grepl("mix", parent, ignore.case = TRUE)) return("Mix_30min")
+  if (grepl("_Mix_", nm, ignore.case = TRUE) && !grepl("_20min\\b", nm, ignore.case = TRUE)) return("Mix_30min")
+  if (!is.na(parent) && grepl("krakatoa", parent, ignore.case = TRUE)) { if (!is.na(dtok)) return(paste0("Kra_", dtok)); return("Kra") }
+  if (grepl("_Kra_", nm, ignore.case = TRUE)) { if (!is.na(dtok)) return(paste0("Kra_", dtok)); return("Kra") }
+  if (!is.na(parent) && grepl("trypsin", parent, ignore.case = TRUE)) { if (!is.na(dtok)) return(paste0("Try_", dtok)); return("Try") }
+  if (grepl("_Try_", nm, ignore.case = TRUE) || grepl("trypsin|tryptic", nm, ignore.case = TRUE)) { if (!is.na(dtok)) return(paste0("Try_", dtok)); return("Try") }
+  if (grepl("_BOB_", nm, ignore.case = TRUE)) { if (!is.na(dtok)) return(paste0("Try_", dtok)); return("Try") }
+  "Unknown"
+}
+
+build_group_map_auto <- function(samples) {
+  data.table(Sample = samples, Group = vapply(samples, auto_guess_group, character(1)), Source = "auto")
+}
+
+rename_groups <- function(gm) {
+  gm <- copy(gm)
+  raw_groups <- sort(unique(gm$Group))
+  kra_groups <- sort(raw_groups[grepl("^Kra", raw_groups)])
+  try_groups <- sort(raw_groups[grepl("^Try", raw_groups)])
+  for (i in seq_along(kra_groups)) gm[Group == kra_groups[i], Group := paste("Krakatoa", i)]
+  for (i in seq_along(try_groups)) gm[Group == try_groups[i], Group := paste("Trypsin", i)]
+  gm[Group == "Mix_20min", Group := "Mix 20 min"]
+  gm[Group == "Mix_30min", Group := "Mix 30 min"]
+  gm[]
+}
+
+cat("  Helper functions loaded.\n\n")
+
+
+# ============================================================================
+# 3. LOAD FASTA
+# ============================================================================
+
+cat(strrep("=", 80), "\n")
+cat("LOADING FASTA\n")
+cat(strrep("=", 80), "\n\n")
+
+fasta_map <- load_fasta_map(fasta_path)
+cat("  FASTA entries loaded:", length(fasta_map), "\n\n")
+
+
+# ============================================================================
+# 4. LOAD ALL SEARCH RESULTS
+# ============================================================================
+
+cat(strrep("=", 80), "\n")
+cat("LOADING ALL SEARCH RESULTS\n")
+cat(strrep("=", 80), "\n\n")
+
+all_pr_dts     <- list()
+protein_mats   <- list()
+gene_map_parts <- list()
+
+for (nm in names(search_dirs)) {
+  d <- search_dirs[nm]
+  cat(sprintf("--- %s ---\n", nm))
+
+  pg <- read_diann_matrix(file.path(d, pg_file), id_col_guess = "Protein.Group")
+  m_prot <- matrix_from_dt(pg$dt, pg$id_col, pg$num_cols, zero_as_na = zero_as_na)
+  cat(sprintf("  Proteins: %d | Samples: %d\n", nrow(m_prot), ncol(m_prot)))
+  protein_mats[[nm]] <- m_prot
+
+  if ("Genes" %in% names(pg$dt)) {
+    gmap <- unique(pg$dt[, .(Protein.Group = pg$dt[[pg$id_col]], Genes)])
+    gmap[, Genes := as.character(Genes)]
+    gene_map_parts[[nm]] <- gmap
+  }
+
+  pr <- read_diann_matrix(file.path(d, pr_file), id_col_guess = "Modified.Sequence")
+  pr_dt    <- pr$dt
+  pep_col  <- intersect(c("Modified.Sequence", "ModifiedPeptideSequence", "Stripped.Sequence"), names(pr_dt))[1]
+  prot_col <- intersect(c("Protein.Group", "Protein.Ids", "Protein.Names"), names(pr_dt))[1]
+  cat(sprintf("  Peptide col: %s | Protein col: %s | Rows: %d\n\n", pep_col, prot_col, nrow(pr_dt)))
+
+  all_pr_dts[[nm]] <- list(dt = pr_dt, pep_col = pep_col, prot_col = prot_col, num_cols = pr$num_cols)
+}
+
+gene_map <- unique(rbindlist(gene_map_parts, fill = TRUE))
+gene_map <- gene_map[!is.na(Genes) & nzchar(Genes)]
+gene_map <- gene_map[!duplicated(Protein.Group)]
+setkey(gene_map, Protein.Group)
+cat("Gene name map:", nrow(gene_map), "entries\n\n")
+
+
+# ============================================================================
+# 5. BUILD GROUP MAP
+# ============================================================================
+
+cat(strrep("=", 80), "\n")
+cat("AUTO-GROUPING SAMPLES\n")
+cat(strrep("=", 80), "\n\n")
+
+all_samples <- unique(unlist(lapply(all_pr_dts, function(x) x$num_cols)))
+cat("  Total unique sample columns:", length(all_samples), "\n")
+
+group_map <- build_group_map_auto(all_samples)
+group_map <- rename_groups(group_map)
+
+grp_counts <- group_map[, .N, by = Group][order(Group)]
+for (r in seq_len(nrow(grp_counts))) cat(sprintf("    %-15s %d samples\n", grp_counts$Group[r], grp_counts$N[r]))
+
+group_map <- group_map[Group %in% GROUP_ORDER]
+fwrite(group_map, file.path(out_dir, "sample_group_mapping.csv"))
+cat("\n  Saved: sample_group_mapping.csv\n\n")
+
+# ── Diagnostic: show Mix group sample assignments for verification ──
+cat("  --- Mix group sample diagnostics (verify 30 min assignment) ---\n")
+for (mg in c("Mix 30 min")) {
+  ms <- group_map[Group == mg, Sample]
+  cat(sprintf("  %s (%d samples):\n", mg, length(ms)))
+  for (s in head(ms, 5)) cat(sprintf("    %s\n", basename(gsub("\\\\", "/", s))))
+  if (length(ms) > 5) cat(sprintf("    ... and %d more\n", length(ms) - 5))
+}
+cat("  ---------------------------------------------------------------\n\n")
+
+
+# ============================================================================
+# 6. BUILD CANDIDATE POOL (LENGTH > 200 aa, IN FASTA)
+# ============================================================================
+
+cat(strrep("=", 80), "\n")
+cat("BUILDING CANDIDATE PROTEIN POOL\n")
+cat(strrep("=", 80), "\n\n")
+
+all_protein_stats <- rbindlist(lapply(names(protein_mats), function(nm) {
+  m <- protein_mats[[nm]]
+  data.table(ProteinGroup = rownames(m), Search = nm,
+             N_Detected = rowSums(!is.na(m)),
+             MedianInt  = apply(m, 1, function(x) median(x, na.rm = TRUE)))
+}))
+all_protein_stats[is.nan(MedianInt), MedianInt := 0]
+
+protein_rank <- all_protein_stats[, .(
+  Total_Detections = sum(N_Detected),
+  N_Searches       = sum(N_Detected > 0),
+  Mean_MedianInt   = mean(MedianInt[MedianInt > 0], na.rm = TRUE)
+), by = ProteinGroup]
+protein_rank[is.nan(Mean_MedianInt), Mean_MedianInt := 0]
+
+protein_rank[, PrimaryAccession := extract_primary_accession(ProteinGroup)]
+protein_rank[, InFasta := PrimaryAccession %in% names(fasta_map)]
+protein_rank <- merge(protein_rank, gene_map, by.x = "ProteinGroup", by.y = "Protein.Group", all.x = TRUE)
+protein_rank[is.na(Genes) | !nzchar(Genes), Genes := PrimaryAccession]
+protein_rank[, ProteinLength := ifelse(InFasta, nchar(fasta_map[PrimaryAccession]), NA_integer_)]
+
+protein_rank <- protein_rank[InFasta == TRUE]
+cat(sprintf("  Proteins in FASTA: %d\n", nrow(protein_rank)))
+
+candidates <- protein_rank[N_Searches >= 1]   # two separate library searches (Krak + Try) unioned; >=1 keeps proteins detected in EITHER search
+setorder(candidates, -N_Searches, -Total_Detections, -Mean_MedianInt)
+
+MAX_CANDIDATES <- 200
+if (nrow(candidates) > MAX_CANDIDATES) candidates <- candidates[seq_len(MAX_CANDIDATES)]
+cat(sprintf("  Candidate pool for coverage scan: %d proteins\n\n", nrow(candidates)))
+
+
+# ============================================================================
+# 7. COMPUTE COVERAGE FOR ALL CANDIDATES x ALL GROUPS
+# ============================================================================
+
+cat(strrep("=", 80), "\n")
+cat("SCANNING COVERAGE FOR ALL CANDIDATES x GROUPS\n")
+cat(strrep("=", 80), "\n\n")
+
+collect_group_peptides <- function(accession, grp_samples) {
+  grp_peptides <- character()
+  for (nm in names(all_pr_dts)) {
+    pd <- all_pr_dts[[nm]]; dt <- pd$dt; pep_col <- pd$pep_col; prot_col <- pd$prot_col
+    rows_idx <- grep(accession, dt[[prot_col]], fixed = TRUE)
+    if (length(rows_idx) == 0) next
+    sub_dt <- dt[rows_idx]
+    avail_samps <- intersect(grp_samples, pd$num_cols)
+    if (length(avail_samps) == 0) next
+    for (cname in avail_samps) sub_dt[[cname]] <- suppressWarnings(as.numeric(sub_dt[[cname]]))
+    signal <- sub_dt[, ..avail_samps]
+    has_signal <- rowSums(!is.na(signal) & signal > 0) > 0
+    grp_peptides <- c(grp_peptides, sub_dt[[pep_col]][has_signal])
+  }
+  unique(grp_peptides[!is.na(grp_peptides) & nzchar(grp_peptides)])
+}
+
+# Collect modified peptides (for PTM mapping)
+collect_group_modified_peptides <- function(accession, grp_samples) {
+  mod_peps <- character()
+  for (nm in names(all_pr_dts)) {
+    pd <- all_pr_dts[[nm]]; dt <- pd$dt; pep_col <- pd$pep_col; prot_col <- pd$prot_col
+    rows_idx <- grep(accession, dt[[prot_col]], fixed = TRUE)
+    if (length(rows_idx) == 0) next
+    sub_dt <- dt[rows_idx]
+    avail_samps <- intersect(grp_samples, pd$num_cols)
+    if (length(avail_samps) == 0) next
+    for (cname in avail_samps) sub_dt[[cname]] <- suppressWarnings(as.numeric(sub_dt[[cname]]))
+    signal <- sub_dt[, ..avail_samps]
+    has_signal <- rowSums(!is.na(signal) & signal > 0) > 0
+    mod_peps <- c(mod_peps, sub_dt[[pep_col]][has_signal])
+  }
+  unique(mod_peps[!is.na(mod_peps) & nzchar(mod_peps)])
+}
+
+grp_sample_lists <- setNames(lapply(GROUP_ORDER, function(g) group_map[Group == g, Sample]), GROUP_ORDER)
+
+scan_results <- list()
+for (ci in seq_len(nrow(candidates))) {
+  accession <- candidates$PrimaryAccession[ci]; gene <- candidates$Genes[ci]
+  prot_seq <- fasta_map[[accession]]; prot_len <- nchar(prot_seq)
+  if (ci %% 25 == 1) cat(sprintf("  Scanning candidate %d/%d: %s...\n", ci, nrow(candidates), gene))
+  for (grp in GROUP_ORDER) {
+    grp_samples <- grp_sample_lists[[grp]]
+    if (length(grp_samples) == 0) next
+    peptides <- collect_group_peptides(accession, grp_samples)
+    if (length(peptides) == 0) {
+      scan_results[[length(scan_results) + 1]] <- data.table(
+        ProteinGroup = candidates$ProteinGroup[ci], PrimaryAccession = accession,
+        Gene = gene, ProteinLength = prot_len, Group = grp, N_Peptides = 0L, Pct_Coverage = 0)
+      next
+    }
+    cov_dt <- build_coverage_ranges(peptides, prot_seq)
+    if (nrow(cov_dt) == 0) {
+      scan_results[[length(scan_results) + 1]] <- data.table(
+        ProteinGroup = candidates$ProteinGroup[ci], PrimaryAccession = accession,
+        Gene = gene, ProteinLength = prot_len, Group = grp, N_Peptides = length(peptides), Pct_Coverage = 0)
+      next
+    }
+    covered_pos <- unique(unlist(lapply(seq_len(nrow(cov_dt)), function(r) seq(cov_dt$Start[r], cov_dt$End[r]))))
+    pct <- 100 * length(covered_pos) / prot_len
+    scan_results[[length(scan_results) + 1]] <- data.table(
+      ProteinGroup = candidates$ProteinGroup[ci], PrimaryAccession = accession,
+      Gene = gene, ProteinLength = prot_len, Group = grp, N_Peptides = length(peptides), Pct_Coverage = pct)
+  }
+}
+scan_dt <- rbindlist(scan_results)
+cat(sprintf("\n  Coverage scan complete: %d entries\n\n", nrow(scan_dt)))
+
+
+# ============================================================================
+# 7b. RANK BY MIX BENEFIT (>=50% coverage, biggest mix gain)
+# ============================================================================
+
+cat(strrep("=", 80), "\n")
+cat("RANKING BY MIX COVERAGE ENHANCEMENT\n")
+cat(strrep("=", 80), "\n\n")
+
+SINGLE_GROUPS <- c("Krakatoa 2", "Trypsin 2")
+MIX_GROUPS    <- c("Mix 30 min")
+
+mix_benefit <- scan_dt[, {
+  single_cov <- Pct_Coverage[Group %in% SINGLE_GROUPS]
+  mix_cov    <- Pct_Coverage[Group %in% MIX_GROUPS]
+  best_single <- if (length(single_cov) > 0) max(single_cov, na.rm = TRUE) else 0
+  best_mix    <- if (length(mix_cov) > 0) max(mix_cov, na.rm = TRUE) else 0
+  max_any     <- max(Pct_Coverage, na.rm = TRUE)
+  .(Best_Single = best_single, Best_Mix = best_mix, Mix_Gain = best_mix - best_single, Max_Any = max_any)
+}, by = .(ProteinGroup, PrimaryAccession, Gene, ProteinLength)]
+
+# Apply minimum coverage threshold: at least one group must reach MIN_COVERAGE_PCT
+mix_benefit <- mix_benefit[Max_Any >= MIN_COVERAGE_PCT]
+cat(sprintf("  Proteins passing >= %d%% coverage threshold: %d\n", MIN_COVERAGE_PCT, nrow(mix_benefit)))
+
+setorder(mix_benefit, -Mix_Gain, -Best_Mix, -Max_Any)
+
+cat("  Mix benefit ranking (top 15 preview):\n")
+cat(sprintf("  %-12s %6s %8s %8s %8s\n", "Gene", "Length", "BestMix", "BestSgl", "Gain"))
+cat("  ", strrep("-", 50), "\n", sep = "")
+for (r in seq_len(min(15, nrow(mix_benefit)))) {
+  cat(sprintf("  %-12s %5d %6.1f%% %6.1f%% %+6.1f%%\n",
+              mix_benefit$Gene[r], mix_benefit$ProteinLength[r],
+              mix_benefit$Best_Mix[r], mix_benefit$Best_Single[r], mix_benefit$Mix_Gain[r]))
+}
+
+top_benefit <- mix_benefit[seq_len(min(TOP_N_PROTEINS, nrow(mix_benefit)))]
+cat(sprintf("\n  Selected top %d proteins with greatest mix enhancement\n\n", nrow(top_benefit)))
+
+fwrite(mix_benefit, file.path(out_dir, "mix_benefit_ranking_all.csv"))
+fwrite(top_benefit, file.path(out_dir, "top_proteins_selected.csv"))
+cat("  Saved: mix_benefit_ranking_all.csv + top_proteins_selected.csv\n\n")
+
+# ── Report proteins LOSING coverage with mix ──
+losers <- mix_benefit[Mix_Gain < 0]
+if (nrow(losers) > 0) {
+  setorder(losers, Mix_Gain)
+  cat(sprintf("  WARNING: %d proteins LOSE coverage with mix (negative gain):\n", nrow(losers)))
+  cat(sprintf("  %-12s %6s %8s %8s %8s\n", "Gene", "Length", "BestMix", "BestSgl", "Loss"))
+  cat("  ", strrep("-", 50), "\n", sep = "")
+  for (r in seq_len(min(15, nrow(losers)))) {
+    cat(sprintf("  %-12s %5d %6.1f%% %6.1f%% %+6.1f%%\n",
+                losers$Gene[r], losers$ProteinLength[r],
+                losers$Best_Mix[r], losers$Best_Single[r], losers$Mix_Gain[r]))
+  }
+  fwrite(losers, file.path(out_dir, "proteins_losing_coverage_with_mix.csv"))
+  cat(sprintf("\n  Full list saved: proteins_losing_coverage_with_mix.csv (%d proteins)\n\n", nrow(losers)))
+} else {
+  cat("  No proteins showed reduced coverage with mix conditions.\n\n")
+}
+
+top_proteins <- top_benefit[, .(ProteinGroup, PrimaryAccession, Gene, ProteinLength, Mix_Gain, Best_Mix, Best_Single)]
+
+
+# ============================================================================
+# 7c. REBUILD DETAILED COVERAGE + COLLECT PTMs FOR TOP PROTEINS
+# ============================================================================
+
+cat(strrep("=", 80), "\n")
+cat("BUILDING DETAILED COVERAGE + PTM MAP FOR TOP ", nrow(top_proteins), " PROTEINS\n", sep = "")
+cat(strrep("=", 80), "\n\n")
+
+coverage_all <- list()
+ptm_all      <- list()
+
+for (i in seq_len(nrow(top_proteins))) {
+  pg_id     <- top_proteins$ProteinGroup[i]
+  accession <- top_proteins$PrimaryAccession[i]
+  gene      <- top_proteins$Gene[i]
+  prot_seq  <- fasta_map[[accession]]
+  prot_len  <- nchar(prot_seq)
+
+  cat(sprintf("--- %d. %s / %s (%d aa, mix gain: %+.1f%%) ---\n",
+              i, gene, accession, prot_len, top_proteins$Mix_Gain[i]))
+
+  for (grp in GROUP_ORDER) {
+    grp_samples <- grp_sample_lists[[grp]]
+    if (length(grp_samples) == 0) next
+
+    # Coverage
+    peptides <- collect_group_peptides(accession, grp_samples)
+    if (length(peptides) == 0) { cat(sprintf("  %-15s  0 peptides\n", grp)); next }
+    cov_dt <- build_coverage_ranges(peptides, prot_seq)
+    if (nrow(cov_dt) > 0) {
+      cov_dt[, `:=`(ProteinGroup = pg_id, PrimaryAccession = accession,
+                    Gene = gene, ProteinLength = prot_len, Group = grp)]
+      coverage_all[[length(coverage_all) + 1]] <- cov_dt
+    }
+    covered_pos <- unique(unlist(lapply(seq_len(nrow(cov_dt)), function(r) seq(cov_dt$Start[r], cov_dt$End[r]))))
+    cat(sprintf("  %-15s  %d pep -> %.1f%%", grp, length(peptides), 100 * length(covered_pos) / prot_len))
+
+    # PTMs from modified sequences
+    mod_peps <- collect_group_modified_peptides(accession, grp_samples)
+    ptm_rows <- list()
+    for (mp in mod_peps) {
+      ptm_dt <- extract_ptm_positions(mp, prot_seq)
+      if (nrow(ptm_dt) > 0) ptm_rows[[length(ptm_rows) + 1]] <- ptm_dt
+    }
+    if (length(ptm_rows) > 0) {
+      ptm_dt_grp <- unique(rbindlist(ptm_rows))
+      ptm_dt_grp[, `:=`(Gene = gene, PrimaryAccession = accession, Group = grp)]
+      ptm_all[[length(ptm_all) + 1]] <- ptm_dt_grp
+      cat(sprintf("  | %d PTM sites", nrow(ptm_dt_grp)))
+    }
+    cat("\n")
+  }
+  cat("\n")
+}
+
+coverage_dt <- rbindlist(coverage_all, fill = TRUE)
+ptm_dt      <- if (length(ptm_all) > 0) rbindlist(ptm_all, fill = TRUE) else data.table()
+
+fwrite(coverage_dt, file.path(out_dir, "peptide_coverage_ranges_by_group.csv"))
+if (nrow(ptm_dt) > 0) fwrite(ptm_dt, file.path(out_dir, "ptm_positions_by_group.csv"))
+cat("  Saved: peptide_coverage_ranges_by_group.csv")
+if (nrow(ptm_dt) > 0) cat(" + ptm_positions_by_group.csv")
+cat("\n\n")
+
+
+# ============================================================================
+# 8. COVERAGE SUMMARY TABLE
+# ============================================================================
+
+cat(strrep("=", 80), "\n")
+cat("COVERAGE SUMMARY TABLE\n")
+cat(strrep("=", 80), "\n\n")
+
+coverage_summary <- coverage_dt[, {
+  all_pos <- unique(unlist(lapply(seq_len(.N), function(r) seq(Start[r], End[r]))))
+  .(N_Peptides = uniqueN(PeptideSeq), N_Covered = length(all_pos),
+    ProteinLen = ProteinLength[1], Pct_Coverage = 100 * length(all_pos) / ProteinLength[1])
+}, by = .(Gene, PrimaryAccession, Group)]
+setorder(coverage_summary, Gene, -Pct_Coverage)
+
+coverage_wide <- dcast(coverage_summary, Gene + PrimaryAccession ~ Group, value.var = "Pct_Coverage", fill = 0)
+print(knitr::kable(coverage_wide, digits = 1, caption = "Sequence Coverage (%) by Gene x Group"))
+
+fwrite(coverage_summary, file.path(out_dir, "coverage_summary_long.csv"))
+fwrite(coverage_wide, file.path(out_dir, "coverage_summary_wide.csv"))
+cat("\n  Saved: coverage_summary_long.csv + coverage_summary_wide.csv\n\n")
+
+
+# ============================================================================
+# FIG. 1: GROUPED BAR CHART — COVERAGE % BY GENE x GROUP
+# ============================================================================
+
+cat(strrep("=", 80), "\n")
+cat("FIG. 1: COVERAGE BAR CHART\n")
+cat(strrep("=", 80), "\n\n")
+
+coverage_summary[, GeneLabel := paste0(Gene, "\n(", formatC(ProteinLen, big.mark = ","), " aa)")]
+coverage_summary[, Group := factor(Group, levels = GROUP_ORDER)]
+
+gene_order <- top_proteins$Gene  # already sorted by mix gain
+coverage_summary[, GeneLabel := factor(GeneLabel,
+  levels = paste0(gene_order, "\n(", coverage_summary[match(gene_order, Gene), formatC(ProteinLen, big.mark = ",")], " aa)"))]
+
+p1 <- ggplot(coverage_summary, aes(x = GeneLabel, y = Pct_Coverage, fill = Group)) +
+  geom_col(position = position_dodge(width = 0.82), width = 0.75,
+           color = "black", linewidth = 0.3) +
+  scale_fill_manual(values = group_colors, name = NULL) +
+  scale_y_continuous(limits = c(0, 105), breaks = seq(0, 100, 20),
+                     labels = function(x) paste0(x, "%"), expand = expansion(mult = c(0, 0.01))) +
+  labs(title = "Protein Sequence Coverage by Protease Group",
+       subtitle = paste0("Top ", nrow(top_proteins),
+                         " proteins ranked by mix coverage enhancement  (\u2265", MIN_COVERAGE_PCT,
+                         "% coverage)"),
+       x = NULL, y = "Sequence Coverage (%)") +
+  pub_theme(base_size = 12) +
+  theme(axis.text.x = element_text(angle = 40, hjust = 1, size = 11, face = "bold"),
+        legend.position = "top",
+        legend.key.size  = unit(0.5, "cm"),
+        legend.text      = element_text(size = 10.5),
+        legend.spacing.x = unit(0.2, "cm"))
+
+print(p1)
+save_pub(p1, file.path(out_dir, "Fig1_Coverage_BarChart.png"), width = 10, height = 7)
+cat("  Saved: Fig1_Coverage_BarChart.png\n\n")
+
+
+
+# ============================================================================
+# PTM-RICH PROTEIN DISCOVERY
+# Scan top candidates for proteins with the most PTM sites
+# ============================================================================
+
+cat(strrep("=", 80), "\n")
+cat("PTM-RICH PROTEIN DISCOVERY\n")
+cat(strrep("=", 80), "\n\n")
+
+if (exists("all_pr_dts") && length(all_pr_dts) > 0) {
+
+  # Quick PTM count: scan up to 50 top candidates for modified peptide counts
+  ptm_scan_pool <- candidates[seq_len(min(50, nrow(candidates)))]
+  cat(sprintf("  Scanning %d candidates for PTM-rich proteins...\n", nrow(ptm_scan_pool)))
+
+  ptm_quick_counts <- list()
+  for (ci in seq_len(nrow(ptm_scan_pool))) {
+    accession <- ptm_scan_pool$PrimaryAccession[ci]
+    gene      <- ptm_scan_pool$Genes[ci]
+    prot_seq  <- fasta_map[[accession]]
+    if (is.null(prot_seq) || !nzchar(prot_seq)) next
+    n_sites   <- 0L
+    for (grp in GROUP_ORDER) {
+      grp_samples <- grp_sample_lists[[grp]]
+      if (length(grp_samples) == 0) next
+      mod_peps <- collect_group_modified_peptides(accession, grp_samples)
+      for (mp in mod_peps) {
+        ptm_rows <- extract_ptm_positions(mp, prot_seq)
+        n_sites  <- n_sites + nrow(ptm_rows)
+      }
+    }
+    if (n_sites > 0) {
+      ptm_quick_counts[[length(ptm_quick_counts) + 1]] <- data.table(
+        PrimaryAccession = accession, Gene = gene, N_PTM_Sites = n_sites,
+        ProteinGroup = ptm_scan_pool$ProteinGroup[ci],
+        ProteinLength = nchar(prot_seq))
+    }
+    if (ci %% 10 == 0) cat(sprintf("    %d / %d ...\n", ci, nrow(ptm_scan_pool)))
+  }
+
+  if (length(ptm_quick_counts) > 0) {
+    ptm_scan_results <- rbindlist(ptm_quick_counts)
+    setorder(ptm_scan_results, -N_PTM_Sites)
+    cat(sprintf("  Proteins with PTMs: %d\n", nrow(ptm_scan_results)))
+    cat("  Top 10 PTM-rich proteins:\n")
+    for (r in seq_len(min(10, nrow(ptm_scan_results)))) {
+      cat(sprintf("    %-12s  %d PTM sites  (%d aa)\n",
+                  ptm_scan_results$Gene[r], ptm_scan_results$N_PTM_Sites[r],
+                  ptm_scan_results$ProteinLength[r]))
+    }
+
+    # ── HARDCODED protein selection for the Fig 3D lollipop (Fig2_Combined_PTM) ──
+    # PI decision: Fig 3D ALWAYS features the same three abundant plasma proteins, NOT the
+    # auto-selected top-3 by PTM count. Accessions are fixed below; the protein sequence LENGTH
+    # is still looked up from the FASTA (fasta_map), and the matching DIA-NN Protein.Group is
+    # resolved from protein_rank (falling back to the accession itself if not present). All
+    # downstream coverage + PTM extraction is unchanged and simply runs on these three.
+    #   ALB    serum albumin           P02768
+    #   APOA1  apolipoprotein A-I      P02647
+    # (FGA dropped 2026-06-29 at PI request: show ALB + one other, larger panels.)
+    FIG2_FIXED_PROTEINS <- data.table(
+      PrimaryAccession = c("P02768", "P02647"),
+      Gene             = c("ALB",    "APOA1"))
+    .resolve_pg <- function(acc) {
+      hit <- protein_rank$ProteinGroup[match(acc, protein_rank$PrimaryAccession)]
+      if (length(hit) == 0 || is.na(hit)) acc else hit
+    }
+    ptm_proteins <- FIG2_FIXED_PROTEINS[, .(
+      PrimaryAccession,
+      Gene,
+      ProteinGroup  = vapply(PrimaryAccession, .resolve_pg, character(1)),
+      ProteinLength = as.integer(nchar(fasta_map[PrimaryAccession])),
+      N_PTM_Sites   = ptm_scan_results$N_PTM_Sites[match(PrimaryAccession,
+                                                         ptm_scan_results$PrimaryAccession)]
+    )]
+    ptm_proteins[is.na(N_PTM_Sites), N_PTM_Sites := 0L]
+    cat(sprintf("\n  Fig. 2 proteins HARDCODED to: %s  (accessions: %s)\n\n",
+                paste(ptm_proteins$Gene, collapse = ", "),
+                paste(ptm_proteins$PrimaryAccession, collapse = ", ")))
+
+    # ── Full coverage + PTM extraction for these 3 proteins ──
+    cat("  Building full coverage + PTM maps for PTM-rich proteins...\n")
+    ptm_rich_cov_all <- list()
+    ptm_rich_ptm_all <- list()
+
+    for (i in seq_len(nrow(ptm_proteins))) {
+      accession <- ptm_proteins$PrimaryAccession[i]
+      gene      <- ptm_proteins$Gene[i]
+      pg_id     <- ptm_proteins$ProteinGroup[i]
+      prot_seq  <- fasta_map[[accession]]
+      prot_len  <- nchar(prot_seq)
+
+      cat(sprintf("  --- %s (%d aa) ---\n", gene, prot_len))
+
+      for (grp in GROUP_ORDER) {
+        grp_samples <- grp_sample_lists[[grp]]
+        if (length(grp_samples) == 0) next
+        peptides <- collect_group_peptides(accession, grp_samples)
+        if (length(peptides) > 0) {
+          cov_dt <- build_coverage_ranges(peptides, prot_seq)
+          if (nrow(cov_dt) > 0) {
+            cov_dt[, `:=`(ProteinGroup = pg_id, PrimaryAccession = accession,
+                          Gene = gene, ProteinLength = prot_len, Group = grp)]
+            ptm_rich_cov_all[[length(ptm_rich_cov_all) + 1]] <- cov_dt
+          }
+        }
+        mod_peps <- collect_group_modified_peptides(accession, grp_samples)
+        ptm_rows <- list()
+        for (mp in mod_peps) {
+          pr <- extract_ptm_positions(mp, prot_seq)
+          if (nrow(pr) > 0) ptm_rows[[length(ptm_rows) + 1]] <- pr
+        }
+        if (length(ptm_rows) > 0) {
+          ptm_dt_grp <- unique(rbindlist(ptm_rows))
+          ptm_dt_grp[, `:=`(Gene = gene, PrimaryAccession = accession, Group = grp)]
+          ptm_rich_ptm_all[[length(ptm_rich_ptm_all) + 1]] <- ptm_dt_grp
+          cat(sprintf("    %-15s %d PTM sites\n", grp, nrow(ptm_dt_grp)))
+        }
+      }
+    }
+
+    ptm_rich_cov_dt <- if (length(ptm_rich_cov_all) > 0) rbindlist(ptm_rich_cov_all, fill = TRUE) else data.table()
+    ptm_rich_ptm_dt <- if (length(ptm_rich_ptm_all) > 0) rbindlist(ptm_rich_ptm_all, fill = TRUE) else data.table()
+    cat(sprintf("\n  PTM-rich dataset: %d coverage ranges, %d PTM sites\n\n",
+                nrow(ptm_rich_cov_dt), nrow(ptm_rich_ptm_dt)))
+
+  } else {
+    cat("  No PTMs found in candidates.\n\n")
+    ptm_proteins <- data.table()
+    ptm_rich_cov_dt <- data.table()
+    ptm_rich_ptm_dt <- data.table()
+  }
+} else {
+  cat("  Precursor data not available — skipping PTM scan.\n\n")
+  ptm_proteins <- data.table()
+  ptm_rich_cov_dt <- data.table()
+  ptm_rich_ptm_dt <- data.table()
+}
+
+
+# ============================================================================
+# FIG. 2: PTM-RICH PROTEINS — COVERAGE WITH PTM OVERLAY
+# Single panel per protein: coverage bars + PTM markers overlaid
+# Subset to 3 groups: Krakatoa 2, Mix 30 min, Trypsin 2
+# ============================================================================
+
+cat(strrep("=", 80), "\n")
+cat("FIG. 2: PTM-RICH PROTEINS — COVERAGE WITH PTM OVERLAY\n")
+cat(strrep("=", 80), "\n\n")
+
+FIG2_GROUPS <- c("Krakatoa 2", "Mix 30 min", "Trypsin 2")
+fig2_colors <- group_colors[FIG2_GROUPS]
+
+# ── Helper: pack markers into the minimum number of non-overlapping rows ──
+# Given sorted x-positions and a minimum separation (in x data units), assigns
+# each marker to the lowest row whose last marker is far enough to the left.
+# Guarantees NO two markers in the same row are closer than min_sep.
+# Co-occurring markers (same/near position) are forced into separate rows (stack).
+pack_into_rows <- function(pos, min_sep) {
+  n <- length(pos)
+  if (n == 0) return(integer(0))
+  ord <- order(pos)
+  row_last_x <- numeric(0)   # last (rightmost) x placed in each row
+  row_of     <- integer(n)
+  for (k in seq_len(n)) {
+    idx <- ord[k]
+    x   <- pos[idx]
+    placed <- FALSE
+    if (length(row_last_x) > 0) {
+      avail <- which(x - row_last_x >= min_sep)
+      if (length(avail) > 0) {
+        r <- avail[1]                # lowest available row
+        row_last_x[r] <- x
+        row_of[idx]   <- r
+        placed <- TRUE
+      }
+    }
+    if (!placed) {
+      row_last_x <- c(row_last_x, x) # open a new row
+      row_of[idx] <- length(row_last_x)
+    }
+  }
+  row_of
+}
+
+if (nrow(ptm_rich_ptm_dt) > 0 && nrow(ptm_proteins) > 0) {
+
+  # Build color + shape maps for observed PTM types
+  observed_mods <- sort(unique(ptm_rich_ptm_dt$ModName))
+  ptm_col_map   <- PTM_COLOR_PALETTE[observed_mods]
+  ptm_shp_map   <- PTM_SHAPE_MAP[observed_mods]
+  for (m in observed_mods) {
+    if (is.na(ptm_col_map[m])) ptm_col_map[m] <- "#333333"
+    if (is.na(ptm_shp_map[m])) ptm_shp_map[m] <- 21
+  }
+  cat("  PTM types observed:", paste(observed_mods, collapse = ", "), "\n")
+  cat("  Groups shown:", paste(FIG2_GROUPS, collapse = ", "), "\n\n")
+
+  protein_plots <- list()
+
+  for (i in seq_len(nrow(ptm_proteins))) {
+    accession <- ptm_proteins$PrimaryAccession[i]
+    gene      <- ptm_proteins$Gene[i]
+    prot_len  <- ptm_proteins$ProteinLength[i]
+    sub_cov   <- ptm_rich_cov_dt[PrimaryAccession == accession & Group %in% FIG2_GROUPS]
+    sub_ptm   <- ptm_rich_ptm_dt[PrimaryAccession == accession & Group %in% FIG2_GROUPS]
+    if (nrow(sub_cov) == 0) next
+
+    cat(sprintf("  %s: %d PTM sites across %d groups\n", gene, nrow(sub_ptm),
+                length(unique(sub_ptm$Group))))
+
+    # Merge coverage ranges per group
+    merged_list <- list()
+    for (grp in FIG2_GROUPS) {
+      g_cov <- sub_cov[Group == grp]; if (nrow(g_cov) == 0) next
+      merged <- merge_ranges(g_cov[, .(Start, End)])
+      if (nrow(merged) > 0) { merged[, Group := grp]; merged_list[[length(merged_list) + 1]] <- merged }
+    }
+    if (length(merged_list) == 0) next
+    merged_dt <- rbindlist(merged_list)
+    merged_dt[, Group := factor(Group, levels = rev(FIG2_GROUPS))]
+
+    # ── Use absolute amino acid positions (x-axis = 1 to prot_len) ──
+
+    # PTM data for overlay — COLLISION-PACKED LAYOUT
+    # Markers are packed into the minimum number of non-overlapping rows per
+    # track. No two markers ever overlap; co-occurring modifications stack.
+    ptm_grp <- if (nrow(sub_ptm) > 0) {
+      pp <- unique(sub_ptm[, .(ProteinPos, ModName, Group)])
+      pp <- pp[!is.na(ModName) & !is.na(Group) & nzchar(ModName)]
+      pp[, Group := factor(Group, levels = rev(FIG2_GROUPS))]
+      pp[, y_base := as.numeric(Group)]
+      pp[, ModName := factor(ModName, levels = observed_mods)]
+      pp
+    } else data.table()
+
+    # ── Count unique PTM sites for this protein (for title) ──
+    n_ptm_unique <- if (nrow(ptm_grp) > 0) length(unique(ptm_grp$ProteinPos)) else 0L
+    n_ptm_mods   <- if (nrow(ptm_grp) > 0) length(unique(as.character(ptm_grp$ModName))) else 0L
+
+    # ── Determine marker size + pack into non-overlapping rows ──
+    # Estimate usable panel width (18" figure minus y-labels/margins/legend gutter)
+    PANEL_W_IN <- 20
+    marker_size  <- 4.2
+    stroke_width <- 0.6
+    max_rows_used <- 1L
+    if (nrow(ptm_grp) > 0) {
+      # Shrink marker iteratively until rows fit cleanly (cap ~8 rows per track)
+      repeat {
+        marker_diam_in <- marker_size / 25.4            # ggplot size ≈ mm diameter
+        min_sep_aa     <- prot_len * (marker_diam_in / PANEL_W_IN) * 1.35
+        # Pack each group's markers into rows independently
+        ptm_grp[, row_id := pack_into_rows(ProteinPos, min_sep_aa), by = Group]
+        max_rows_used <- ptm_grp[, max(row_id)]
+        if (max_rows_used <= 10L || marker_size <= 2.6) break
+        marker_size  <- marker_size * 0.85
+        stroke_width <- max(0.25, stroke_width * 0.9)
+      }
+      # Per-group row count
+      ptm_grp[, n_rows_g := max(row_id), by = Group]
+      # Lollipop geometry: needles rise UPWARD from each lane's baseline.
+      # row_id becomes the stem-height tier — clustered PTMs form a rising skyline.
+      ptm_grp[, lane_base := y_base - 0.35]                       # baseline near lane bottom
+      needle_step <- if (max_rows_used <= 1L) 0.16 else min(0.13, 0.78 / max_rows_used)
+      ptm_grp[, y_pos := lane_base + row_id * needle_step]        # head height
+    }
+
+    # ── Smart axis breaks based on protein length ──
+    # Always end with prot_len; drop any penultimate break too close to it
+    x_break_interval <- if (prot_len <= 150) 25 else if (prot_len <= 400) 50 else if (prot_len <= 800) 100 else 200
+    x_breaks <- seq(0, prot_len, by = x_break_interval)
+    # Drop the last regular break if it's within 40% of an interval from prot_len
+    if (length(x_breaks) >= 2 && (prot_len - tail(x_breaks, 1)) < x_break_interval * 0.4 &&
+        tail(x_breaks, 1) != prot_len) {
+      x_breaks <- head(x_breaks, -1)
+    }
+    # Always add prot_len as the final tick
+    if (tail(x_breaks, 1) != prot_len) x_breaks <- c(x_breaks, prot_len)
+
+    # ── Build lollipop/needle panel ──
+    # Lane geometry: one protease group per horizontal lane, baseline near bottom
+    lane_dt <- data.table(Group = factor(rev(FIG2_GROUPS), levels = rev(FIG2_GROUPS)))
+    lane_dt[, y_center := as.numeric(Group)]
+    lane_dt[, lane_base := y_center - 0.35]
+
+    p <- ggplot() +
+      # Faint band on alternating lanes to visually separate protease tracks
+      geom_rect(data = lane_dt[seq(1, .N, by = 2)],
+                aes(ymin = y_center - 0.5, ymax = y_center + 0.5),
+                xmin = 0, xmax = prot_len, fill = "grey96", color = NA) +
+      # Protein backbone (full length, light grey) — shows the whole sequence
+      geom_segment(data = lane_dt,
+                   aes(x = 0, xend = prot_len, y = lane_base, yend = lane_base),
+                   color = "grey78", linewidth = 1.0, lineend = "round") +
+      # Coverage: covered regions drawn as a colored band on the backbone
+      geom_segment(data = merged_dt,
+                   aes(x = Start - 1, xend = End,
+                       y = as.numeric(Group) - 0.35, yend = as.numeric(Group) - 0.35,
+                       color = Group),
+                   linewidth = 2.4, lineend = "butt", alpha = 0.85) +
+      scale_color_manual(values = fig2_colors, guide = "none")
+
+    # PTM lollipops — stems anchor each head to its exact residue position
+    if (nrow(ptm_grp) > 0) {
+      p <- p +
+        # Stems (thin grey) from baseline up to each head
+        geom_segment(data = ptm_grp,
+                     aes(x = ProteinPos, xend = ProteinPos, y = lane_base, yend = y_pos),
+                     color = "grey55", linewidth = 0.25) +
+        # Heads (filled circles, colored by PTM type)
+        geom_point(data = ptm_grp,
+                   aes(x = ProteinPos, y = y_pos, fill = ModName),
+                   shape = 21, size = marker_size, stroke = stroke_width, color = "grey20") +
+        scale_fill_manual(values = ptm_col_map, name = "PTM Type") +
+        guides(fill = guide_legend(title.position = "top", title.hjust = 0.5,
+                                   ncol = min(length(observed_mods), 6), byrow = TRUE,
+                                   override.aes = list(size = 7, stroke = 0.6)))
+    }
+
+    p <- p +
+      scale_x_continuous(limits = c(0, prot_len),
+                         breaks = x_breaks,
+                         labels = scales::comma,
+                         expand = expansion(mult = c(0.01, 0.01))) +
+      scale_y_continuous(breaks = lane_dt$lane_base,
+                         labels = as.character(lane_dt$Group),
+                         limits = c(0.3, length(FIG2_GROUPS) + 0.55),
+                         expand = expansion(mult = c(0, 0))) +
+      labs(title = paste0(gene, " \u2014 ", format(prot_len, big.mark = ","), " aa  |  ",
+                          n_ptm_unique, " PTM positions  |  ", n_ptm_mods, " modification types"),
+           x = "Amino Acid Position", y = NULL) +
+      pub_theme(base_size = 19) +
+      theme(axis.text.y   = element_text(face = "bold", size = 21),
+            axis.text.x   = element_text(size = 18),
+            axis.title.x  = element_text(size = 21, face = "bold"),
+            axis.ticks.y   = element_blank(),
+            axis.line.y    = element_blank(),
+            plot.title     = element_text(size = 24, face = "bold", margin = margin(b = 6)),
+            panel.grid.major.x = element_line(color = "grey92", linewidth = 0.15),
+            panel.grid.major.y = element_blank(),
+            legend.position = "bottom",
+            legend.title    = element_text(size = 19, face = "bold"),
+            legend.text     = element_text(size = 17),
+            legend.key.size = unit(0.9, "cm"),
+            legend.margin   = margin(t = 6, b = 6),
+            plot.margin     = margin(10, 12, 8, 10))
+
+    protein_plots[[gene]] <- p
+  }
+
+  if (length(protein_plots) > 0) {
+    # Stack all protein panels vertically
+    combined_fig2 <- wrap_plots(protein_plots, ncol = 1) +
+      plot_annotation(
+        title    = "PTM Landscapes of Featured Plasma Proteins",
+        subtitle = paste0(paste(ptm_proteins$Gene, collapse = ", "), "  |  ",
+                          paste(FIG2_GROUPS, collapse = ", "), "  |  ",
+                          length(observed_mods), " PTM types  |  lollipop height = local PTM density"),
+        theme = theme(plot.title    = element_text(face = "bold", size = 30, hjust = 0.5),
+                      plot.subtitle = element_text(size = 21, color = "grey30", hjust = 0.5)))
+
+    print(combined_fig2)
+
+    fig2_h <- max(15, length(protein_plots) * 7.5 + 2.5)
+    ggsave(file.path(out_dir, "Fig2_Combined_PTM.png"), combined_fig2,
+           width = 22, height = fig2_h, dpi = PUB_DPI, units = "in", bg = "white")
+    ggsave(file.path(out_dir, "Fig2_Combined_PTM.pdf"),
+           combined_fig2, width = 22, height = fig2_h, device = cairo_pdf, units = "in")
+    cat("  Saved: Fig2_Combined_PTM.png / .pdf\n\n")
+  }
+} else {
+  cat("  No PTM data available — skipping Figure 2.\n\n")
+}
+
+
+# ============================================================================
+# FIG. 3 (manuscript Fig 3E): TRYPSIN 2 vs MIX 30 — PROTEOME COVERAGE COMPARISON
+# 6/5 "All Searches" UNION of the two separate library searches.
+#   - Restrict to protein GROUPS quantified in BOTH Mix 30 and Trypsin 2 (union of
+#     each search's pg_matrix presence sets, then intersected across the 2 groups).
+#   - Per-protein coverage = union of that group's DETECTED stripped peptides mapped
+#     to the primary accession's FASTA sequence.
+# Mirrors the independent re-derivation of these numbers:
+#   1,493 in both | 368 gained | 12 lost | 1,113 unchanged | A1BG 63.0 -> 86.3.
+# SINGLE Delta-coverage waterfall panel (absolute-coverage panel B is dropped).
+# ============================================================================
+
+cat(strrep("=", 80), "\n")
+cat("FIG. 3E: TRYPSIN 2 vs MIX 30 — COVERAGE COMPARISON (6/5 UNION)\n")
+cat(strrep("=", 80), "\n\n")
+
+mix30_samp <- grp_sample_lists[["Mix 30 min"]]
+try2_samp  <- grp_sample_lists[["Trypsin 2"]]
+cat(sprintf("  Mix 30 columns: %d | Trypsin 2 columns: %d\n", length(mix30_samp), length(try2_samp)))
+
+# ── (a) Protein-group presence per group, unioned across the two searches ──
+# Presence = non-zero / non-NA pg_matrix intensity in ANY of the group's columns.
+pg_present <- function(m, cols) {
+  cols <- intersect(cols, colnames(m))
+  if (length(cols) == 0) return(character(0))
+  sub <- m[, cols, drop = FALSE]
+  rownames(m)[rowSums(!is.na(sub)) > 0]
+}
+Mix30_pg <- character(0); Try2_pg <- character(0)
+for (s in names(protein_mats)) {
+  m <- protein_mats[[s]]
+  Mix30_pg <- union(Mix30_pg, pg_present(m, mix30_samp))
+  Try2_pg  <- union(Try2_pg,  pg_present(m, try2_samp))
+}
+both_pg <- intersect(Mix30_pg, Try2_pg)
+cat(sprintf("  pg union: Mix30=%d  Try2=%d  BOTH=%d\n", length(Mix30_pg), length(Try2_pg), length(both_pg)))
+
+# ── (b) Detected stripped peptides per protein group, unioned across searches ──
+# A peptide row is DETECTED in a group if it has a non-zero, non-NA intensity in
+# ANY of that group's columns; peptides are keyed to the row's exact Protein.Group.
+det_cols <- function(dt, cols) {
+  if (length(cols) == 0) return(rep(FALSE, nrow(dt)))
+  sub <- as.matrix(dt[, ..cols]); storage.mode(sub) <- "numeric"
+  rowSums(!is.na(sub) & sub > 0) > 0
+}
+mix_rows <- list(); try_rows <- list()
+for (s in names(all_pr_dts)) {
+  pd  <- all_pr_dts[[s]]; dt <- pd$dt
+  pgv <- as.character(dt[["Protein.Group"]])
+  ssv <- if ("Stripped.Sequence" %in% names(dt)) as.character(dt[["Stripped.Sequence"]]) else
+           vapply(as.character(dt[[pd$pep_col]]), strip_modifications, character(1))
+  mcols <- intersect(mix30_samp, pd$num_cols); tcols <- intersect(try2_samp, pd$num_cols)
+  dm <- det_cols(dt, mcols); dt2 <- det_cols(dt, tcols)
+  if (any(dm))  mix_rows[[s]] <- data.table(pg = pgv[dm],  pep = ssv[dm])
+  if (any(dt2)) try_rows[[s]] <- data.table(pg = pgv[dt2], pep = ssv[dt2])
+}
+mix_dt <- unique(rbindlist(mix_rows)); mix_dt <- mix_dt[nzchar(pep) & nzchar(pg)]
+try_dt <- unique(rbindlist(try_rows)); try_dt <- try_dt[nzchar(pep) & nzchar(pg)]
+mix_pep <- split(mix_dt$pep, mix_dt$pg)
+try_pep <- split(try_dt$pep, try_dt$pg)
+
+# ── (c) Per-protein-group sequence coverage from the unioned peptide set ──
+coverage_one <- function(pg_id, peps) {
+  a <- extract_primary_accession(pg_id)
+  s <- fasta_map[[a]]
+  if (is.null(s) || is.na(s) || !nzchar(s) || length(peps) == 0) return(NA_real_)
+  peps <- unique(peps[nzchar(peps)])
+  if (length(peps) == 0) return(NA_real_)
+  L <- nchar(s); covered <- logical(L)
+  for (p in peps) {
+    mm <- gregexpr(p, s, fixed = TRUE)[[1]]
+    if (mm[1] == -1L) next
+    pl <- nchar(p)
+    for (st in mm) covered[st:(st + pl - 1L)] <- TRUE
+  }
+  100 * sum(covered) / L
+}
+
+comp_rows <- list()
+for (g in both_pg) {
+  mc <- coverage_one(g, mix_pep[[g]])
+  tc <- coverage_one(g, try_pep[[g]])
+  if (is.na(mc) || is.na(tc)) next
+  a <- extract_primary_accession(g)
+  comp_rows[[length(comp_rows) + 1]] <- data.table(
+    ProteinGroup = g, PrimaryAccession = a,
+    ProteinLength = nchar(fasta_map[[a]]), Mix30 = mc, Try2 = tc, Gain = mc - tc)
+}
+comp_wide <- rbindlist(comp_rows)
+comp_wide <- merge(comp_wide, gene_map, by.x = "ProteinGroup", by.y = "Protein.Group", all.x = TRUE)
+comp_wide[is.na(Genes) | !nzchar(Genes), Genes := PrimaryAccession]
+
+# Three-category classification (match the Python reference: +/- 1e-9 tolerance)
+comp_wide[, Direction := fifelse(Gain > 1e-9, "Gained",
+                          fifelse(Gain < -1e-9, "Lost", "Unchanged"))]
+
+n_gained    <- sum(comp_wide$Direction == "Gained")
+n_lost      <- sum(comp_wide$Direction == "Lost")
+n_unchanged <- sum(comp_wide$Direction == "Unchanged")
+med_gain    <- median(comp_wide$Gain)
+mean_gain   <- mean(comp_wide$Gain)
+
+cat(sprintf("\n  Protein groups in BOTH (mappable): %s\n", format(nrow(comp_wide), big.mark = ",")))
+cat(sprintf("  Gained coverage:        %s\n", format(n_gained, big.mark = ",")))
+cat(sprintf("  Lost coverage:          %s\n", format(n_lost, big.mark = ",")))
+cat(sprintf("  Unchanged:              %s\n", format(n_unchanged, big.mark = ",")))
+cat(sprintf("  Median change: %+.2f%%   Mean change: %+.2f%%\n", med_gain, mean_gain))
+a1 <- comp_wide[PrimaryAccession == "P04217"]
+if (nrow(a1) > 0) cat(sprintf("  A1BG (P04217): Trypsin 2 %.1f%% -> Mix 30 %.1f%%  (gain %+.1f)\n\n",
+                              a1$Try2[1], a1$Mix30[1], a1$Gain[1]))
+
+fwrite(comp_wide, file.path(out_dir, "Trypsin2_vs_Mix30_comparison_full_proteome.csv"))
+cat("  Saved: Trypsin2_vs_Mix30_comparison_full_proteome.csv\n\n")
+
+# -- Single waterfall panel (Delta coverage; absolute-coverage panel B dropped) --
+comp_colors <- c("Gained" = "#2D8E5F", "Lost" = "#C0392B", "Unchanged" = "#808080")
+setorder(comp_wide, -Gain)
+comp_wide[, Rank := .I]
+
+# Rank=1 is highest gain; trans="reverse" puts Rank=1 at the top of the y-axis.
+fig3_waterfall <- ggplot(comp_wide, aes(x = Gain, y = Rank, fill = Direction)) +
+  geom_col(width = 1, color = NA, orientation = "y") +
+  geom_vline(xintercept = 0, linewidth = 0.6, color = "black") +
+  scale_fill_manual(values = comp_colors, guide = "none") +
+  scale_x_continuous(labels = function(x) paste0(sprintf("%+.0f", x), "%")) +
+  scale_y_continuous(expand = expansion(mult = c(0.005, 0.005)),
+                     labels = scales::comma,
+                     trans  = "reverse") +
+  labs(title = "Trypsin 2 vs Mix 30 min — Proteome Sequence-Coverage Comparison",
+       subtitle = paste0(format(nrow(comp_wide), big.mark = ","),
+                         " protein groups quantified in both  |  ",
+                         format(n_gained, big.mark = ","), " gained  |  ",
+                         format(n_lost, big.mark = ","), " lost  |  ",
+                         format(n_unchanged, big.mark = ","), " unchanged"),
+       y = "Protein groups (ranked by Δ coverage)",
+       x = "Δ Coverage (Mix 30 min − Trypsin 2)") +
+  annotate("label", y = nrow(comp_wide) * 0.02, x = max(comp_wide$Gain) * 0.80,
+           label = paste0(format(n_gained, big.mark = ","), " gained"),
+           vjust = 0, fontface = "bold", color = "#2D8E5F", size = 4.6,
+           fill = "white", label.size = 0, label.padding = unit(0.15, "lines")) +
+  annotate("label", y = nrow(comp_wide) * 0.98, x = min(comp_wide$Gain) * 0.80,
+           label = paste0(format(n_lost, big.mark = ","), " lost"),
+           vjust = 1, fontface = "bold", color = "#C0392B", size = 4.6,
+           fill = "white", label.size = 0, label.padding = unit(0.15, "lines")) +
+  pub_theme(base_size = 11.5) +
+  theme(plot.title    = element_text(size = 17, face = "bold", hjust = 0.5),
+        plot.subtitle = element_text(size = 11, hjust = 0.5, color = "grey30"))
+
+print(fig3_waterfall)
+
+ggsave(file.path(out_dir, "Fig3_Proteome_Comparison.png"), fig3_waterfall,
+       width = 10, height = 11, dpi = PUB_DPI, units = "in", bg = "white")
+ggsave(file.path(out_dir, "Fig3_Proteome_Comparison.pdf"),
+       fig3_waterfall, width = 10, height = 11, device = cairo_pdf, units = "in")
+cat("  Saved: Fig3_Proteome_Comparison.png / .pdf (single waterfall panel)\n\n")
+
+
+# ============================================================================
+# 9. GENERATE HTML REPORT WITH EMBEDDED FIGURES
+# ============================================================================
+
+cat(strrep("=", 80), "\n")
+cat("GENERATING HTML REPORT WITH EMBEDDED FIGURES\n")
+cat(strrep("=", 80), "\n\n")
+
+# ── base64 encoder (same approach as Python script) ──
+png_to_base64 <- function(png_path) {
+  if (!file.exists(png_path)) return(NULL)
+  raw <- readBin(png_path, "raw", file.info(png_path)$size)
+  base64enc::base64encode(raw)
+}
+
+# install base64enc if missing
+if (!requireNamespace("base64enc", quietly = TRUE)) {
+  install.packages("base64enc", repos = "https://cloud.r-project.org")
+  library(base64enc)
+}
+
+# ── Gather stats ──
+n_searches    <- length(search_dirs)
+n_groups      <- length(GROUP_ORDER)
+n_candidates  <- nrow(candidates)
+n_pass_cov    <- nrow(mix_benefit)
+n_final       <- nrow(top_proteins)
+n_ptm_types   <- if (nrow(ptm_dt) > 0) length(unique(ptm_dt$ModName)) else 0
+n_ptm_total   <- nrow(ptm_dt)
+
+# ── Collect all figure PNGs from output directory ──
+all_pngs <- list.files(out_dir, pattern = "\\.png$", full.names = TRUE)
+cat("  Found", length(all_pngs), "PNG files to embed\n")
+
+# ── Figure descriptions (method + interpretation) ──
+fig_descriptions <- list(
+  "Fig1_Coverage_BarChart" = list(
+    title  = "Fig. 1 — Sequence Coverage by Protease Group",
+    method = paste0(
+      "Grouped bar chart of non-redundant amino acid coverage (%) per protein across 3 experimental groups ",
+      "(Krakatoa 2, Mix 30 min, Trypsin 2). ",
+      "Coverage computed by collecting all peptides detected in each group's samples across the two DIA-NN ",
+      "library searches (Krakatoa + Trypsin; 6/5 union), mapping to the FASTA reference sequence, and merging overlapping ranges. ",
+      "Proteins ordered by mix coverage gain (descending)."),
+    interpret = paste0(
+      "Compare bar heights across groups for each protein. Taller bars for Mix 30 min vs Krakatoa or ",
+      "Trypsin alone indicate that mixed protease digestion improves sequence coverage. Consistent gains across ",
+      "proteins support the complementarity of Krakatoa and Trypsin cleavage specificities.")
+  ),
+  "Fig2_Combined_PTM" = list(
+    title  = "Fig. 2 — PTM Landscape of PTM-Rich Proteins (Lollipop Plot)",
+    method = paste0(
+      "Two fixed plasma proteins are featured: ALB (P02768) and APOA1 (P02647). ",
+      "PTMs are restricted to a common-biological keep-list of 10 UniMod modifications ",
+      "(Acetyl, Phospho, Methyl, Dimethyl, Trimethyl, Propionamide, Cys->Dha, Glutathione, Formyl, Succinyl). ",
+      "Three protease groups shown: Krakatoa 2, Mix 30 min, Trypsin 2. ",
+      "X-axis shows absolute amino acid position (residue number) spanning the full protein sequence; ",
+      "all panels share the same physical width so panel length represents the complete sequence. ",
+      "Each protease group occupies a horizontal lane with the protein backbone drawn in grey and ",
+      "observed (covered) regions highlighted in the group color. PTMs are drawn as lollipops: a thin stem ",
+      "rises from the backbone at the exact residue position to a circular head colored by PTM type. ",
+      "Where modifications cluster, stems are tiered into a non-overlapping skyline so every PTM remains visible ",
+      "and anchored to its position; head size adapts to local density."),
+    interpret = paste0(
+      "Stem position gives the exact residue; head color gives the modification type; the height of a ",
+      "needle cluster reflects how many PTMs concentrate in that region. Compare lanes vertically to see ",
+      "which protease condition detects a given modification\u2014differences highlight protease-dependent ",
+      "modification accessibility, and the breadth of detected PTMs illustrates the workflow's sensitivity.")
+  ),
+  "Fig3_Proteome_Comparison" = list(
+    title  = "Fig. 3 — Proteome-Wide Trypsin 2 vs Mix 30 min Coverage Comparison",
+    method = paste0(
+      "Single vertical waterfall of per-protein-group sequence-coverage change (Δ = Mix 30 min − Trypsin 2). ",
+      "Restricted to protein groups quantified in BOTH Mix 30 and Trypsin 2 in the 6/5 union of the two library ",
+      "searches; per-group coverage is computed from the union of that group's detected stripped peptides mapped to ",
+      "the primary accession's FASTA sequence. Green = coverage gained with Mix 30, red = lost, grey = unchanged."),
+    interpret = paste0(
+      "A predominantly green waterfall (bars extending right) confirms that mixed-protease digestion increases ",
+      "sequence coverage at proteome scale, while the small red tail flags the few protein groups that lose coverage. ",
+      "Bar length gives the magnitude of the coverage change for each protein group.")
+  )
+)
+
+# ── Build HTML ──
+report_html <- paste0('<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sequence Coverage Analysis Report</title>
+<style>
+  @import url("https://fonts.googleapis.com/css2?family=IBM+Plex+Serif:wght@300;400;600;700&family=JetBrains+Mono:wght@400;600&display=swap");
+
+  :root {
+    --primary: #1a365d;
+    --secondary: #2c5282;
+    --accent: #ed8936;
+    --bg-main: #fafafa;
+    --bg-card: #ffffff;
+    --text-primary: #1a202c;
+    --text-secondary: #4a5568;
+    --border: #e2e8f0;
+    --shadow: rgba(0,0,0,0.1);
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: "IBM Plex Serif", serif;
+    line-height: 1.7;
+    color: var(--text-primary);
+    background: var(--bg-main);
+  }
+
+  .header {
+    background: linear-gradient(135deg, var(--primary) 0%, var(--secondary) 100%);
+    color: white;
+    padding: 4rem 2rem 3rem;
+    text-align: center;
+  }
+  .header h1 { font-size: 2.5rem; font-weight: 700; margin-bottom: 0.5rem; }
+  .header .subtitle { font-size: 1.1rem; opacity: 0.9; }
+  .header .meta { margin-top: 1.5rem; font-size: 0.9rem; opacity: 0.85; font-family: "JetBrains Mono", monospace; }
+
+  .container { max-width: 1400px; margin: 0 auto; padding: 3rem 2rem; }
+
+  .overview-stats {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 1.5rem;
+    margin-bottom: 3rem;
+  }
+  .stat-card {
+    background: white; border: 2px solid var(--border); border-radius: 12px;
+    padding: 1.5rem; text-align: center; box-shadow: 0 4px 6px var(--shadow);
+  }
+  .stat-value { font-size: 2.2rem; font-weight: 700; color: var(--primary); }
+  .stat-label { font-size: 0.88rem; color: var(--text-secondary); margin-top: 0.4rem; }
+
+  .section {
+    background: var(--bg-card); border: 1px solid var(--border); border-radius: 12px;
+    padding: 2.5rem; margin-bottom: 2.5rem; box-shadow: 0 4px 6px var(--shadow);
+  }
+  .section-header {
+    display: flex; align-items: center; gap: 1rem;
+    margin-bottom: 2rem; padding-bottom: 1rem; border-bottom: 2px solid var(--accent);
+  }
+  .section-number {
+    background: linear-gradient(135deg, var(--primary), var(--secondary));
+    color: white; width: 48px; height: 48px; border-radius: 10px;
+    display: flex; align-items: center; justify-content: center;
+    font-weight: 700; font-size: 1.2rem; flex-shrink: 0;
+  }
+  .section h2 { color: var(--primary); font-size: 1.8rem; font-weight: 600; }
+
+  .plot-container {
+    margin: 2.5rem 0; padding: 1.5rem;
+    background: #f8fafc; border-radius: 10px; border: 1px solid var(--border);
+  }
+  .plot-title { font-weight: 600; color: var(--primary); margin-bottom: 1rem; font-size: 1.15rem; }
+  .plot-image { width: 100%; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); margin-bottom: 1rem; }
+
+  .method-box {
+    background: #e6f2ff; border-left: 4px solid var(--secondary);
+    padding: 1rem 1.25rem; margin-bottom: 0.75rem; border-radius: 6px;
+  }
+  .method-box strong { color: var(--secondary); font-size: 0.95rem; }
+  .method-box p { margin: 0; font-size: 0.92rem; line-height: 1.6; }
+
+  .interpret-box {
+    background: #fff5e6; border-left: 4px solid var(--accent);
+    padding: 1rem 1.25rem; border-radius: 6px;
+  }
+  .interpret-box strong { color: var(--accent); font-size: 0.95rem; }
+  .interpret-box p { margin: 0; font-size: 0.92rem; line-height: 1.6; }
+
+  .step {
+    background: #fafafa; border: 1px solid #e0e0e0; border-radius: 8px;
+    padding: 16px 20px; margin: 16px 0;
+  }
+  .step-num {
+    display: inline-block; background: var(--primary); color: white;
+    width: 28px; height: 28px; border-radius: 50%; text-align: center;
+    line-height: 28px; font-weight: bold; font-size: 0.85rem; margin-right: 8px;
+  }
+
+  .param-table { border-collapse: collapse; width: 100%; margin: 16px 0; }
+  .param-table th { background: var(--primary); color: white; padding: 10px 14px; text-align: left; }
+  .param-table td { padding: 8px 14px; border-bottom: 1px solid #eee; }
+  .param-table tr:nth-child(even) { background: #f9f9f9; }
+
+  code { background: #f0f0f0; padding: 2px 6px; border-radius: 3px; font-size: 0.9rem; }
+
+  .footer {
+    background: var(--primary); color: white; padding: 2rem;
+    text-align: center; margin-top: 4rem; border-radius: 0 0 12px 12px;
+  }
+
+  @media print { .section { break-inside: avoid; } }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>Sequence Coverage Analysis</h1>
+  <div class="subtitle">Multi-Protease Coverage Enhancement &mdash; Mix vs Single Protease</div>
+  <div class="meta">Generated: ', format(Sys.time(), "%B %d, %Y at %I:%M %p"), '</div>
+</div>
+
+<div class="container">
+
+  <div class="overview-stats">
+    <div class="stat-card"><div class="stat-value">', n_final, '</div><div class="stat-label">Proteins Selected</div></div>
+    <div class="stat-card"><div class="stat-value">', n_searches, '</div><div class="stat-label">Search Strategies</div></div>
+    <div class="stat-card"><div class="stat-value">', n_groups, '</div><div class="stat-label">Protease Groups</div></div>
+    <div class="stat-card"><div class="stat-value">', n_candidates, '</div><div class="stat-label">Candidates Screened</div></div>
+    <div class="stat-card"><div class="stat-value">', n_ptm_total, '</div><div class="stat-label">PTM Sites Mapped</div></div>
+    <div class="stat-card"><div class="stat-value">', sprintf("%.0f%%", mean(top_proteins$Mix_Gain)), '</div><div class="stat-label">Avg Mix Gain</div></div>
+  </div>
+
+  <!-- SECTION 1: Methods -->
+  <section class="section">
+    <div class="section-header">
+      <div class="section-number">1</div>
+      <h2>Methods</h2>
+    </div>
+
+    <h3 style="color:var(--primary); margin-bottom:12px;">Data Sources</h3>
+    <p>Peptide and protein identifications from DIA-NN analysis across <strong>', n_searches, ' library searches</strong>
+    (Krakatoa_Library_Search, Trypsin_Library_Search) of the same 324 raw files; detections are taken as the 6/5
+    "All Searches" UNION (a peptide/precursor or protein group counts as detected in a group if it has non-zero,
+    non-NA intensity in that group&rsquo;s columns in EITHER search).
+    Each search produced protein-level (<code>report.pg_matrix.tsv</code>) and precursor-level
+    (<code>report.pr_matrix.tsv</code>) matrices. Reference proteome: UniProt Human (reviewed), October 28, 2025.</p>
+
+    <h3 style="color:var(--primary); margin-top:20px; margin-bottom:12px;">Sample Grouping</h3>
+    <table class="param-table">
+      <tr><th>Group</th><th>Protease</th><th>Description</th></tr>
+      <tr><td>Krakatoa 2</td><td>Krakatoa</td><td>Second Krakatoa replicate</td></tr>
+      <tr><td>Mix 30 min</td><td>Krakatoa + Trypsin</td><td>Mixed protease, 30-minute LC-MS method</td></tr>
+      <tr><td>Trypsin 2</td><td>Trypsin</td><td>Second Trypsin replicate</td></tr>
+    </table>
+    <p style="margin-top:8px; font-style:italic; color:var(--muted);">Note: Krakatoa 1, Mix 20 min,
+    and Trypsin 1 were excluded from this analysis to produce cleaner visualizations focused on the
+    best-performing replicate of each protease condition.</p>
+    <p style="margin-top:8px;">Grouping was performed automatically using filename pattern matching
+    (parent folder names, date tokens, protease identifiers), consistent with
+    <code>DIA_NN_Result_Comparison.R</code> and <code>DIA_NN_Sequence_PTM_Extraction.R</code>.</p>
+
+    <h3 style="color:var(--primary); margin-top:20px; margin-bottom:12px;">Protein Selection Pipeline</h3>
+
+    <div class="step">
+      <span class="step-num">1</span>
+      <strong>Candidate Pool:</strong>
+      Protein groups detected in &ge;1 of the two library searches with FASTA match
+      (<strong>', n_candidates, ' proteins</strong>).
+    </div>
+    <div class="step">
+      <span class="step-num">2</span>
+      <strong>Coverage Calculation:</strong>
+      For each candidate &times; group, peptides detected in that group&rsquo;s samples across
+      <em>all search strategies</em> (union) were mapped to the FASTA sequence. Overlapping ranges
+      merged to compute non-redundant amino acid coverage.
+    </div>
+    <div class="step">
+      <span class="step-num">3</span>
+      <strong>Coverage Filter:</strong>
+      Required <strong>&ge;', MIN_COVERAGE_PCT, '%</strong> coverage in at least one group.
+      <strong>', n_pass_cov, '</strong> proteins passed.
+    </div>
+    <div class="step">
+      <span class="step-num">4</span>
+      <strong>Mix Benefit Ranking:</strong>
+      <em>Mix Gain = Best Mix Coverage &minus; Best Single-Protease Coverage</em>.
+      Ranked descending; top <strong>', n_final, '</strong> selected.
+    </div>
+
+    <h3 style="color:var(--primary); margin-top:20px; margin-bottom:12px;">PTM Mapping</h3>
+    <p>Post-translational modifications extracted from DIA-NN UniMod annotations (excluding
+    Carbamidomethyl/UniMod:4). Sites mapped to absolute protein positions.
+    <strong>', n_ptm_total, ' PTM sites</strong> across <strong>', n_ptm_types, ' modification types</strong>.</p>
+  </section>
+
+  <!-- SECTION 2: Selected Proteins -->
+  <section class="section">
+    <div class="section-header">
+      <div class="section-number">2</div>
+      <h2>Selected Proteins</h2>
+    </div>
+    <table class="param-table">
+      <tr><th>#</th><th>Gene</th><th>Accession</th><th>Length</th><th>Best Mix</th><th>Best Single</th><th>Mix Gain</th></tr>')
+
+for (i in seq_len(nrow(top_proteins))) {
+  report_html <- paste0(report_html, '
+      <tr><td>', i, '</td><td><strong>', top_proteins$Gene[i], '</strong></td>',
+      '<td>', top_proteins$PrimaryAccession[i], '</td>',
+      '<td>', format(top_proteins$ProteinLength[i], big.mark = ","), ' aa</td>',
+      '<td>', sprintf("%.1f%%", top_proteins$Best_Mix[i]), '</td>',
+      '<td>', sprintf("%.1f%%", top_proteins$Best_Single[i]), '</td>',
+      '<td><strong>', sprintf("%+.1f%%", top_proteins$Mix_Gain[i]), '</strong></td></tr>')
+}
+
+report_html <- paste0(report_html, '
+    </table>
+  </section>')
+
+# ── SECTION 3+: Figures with embedded PNGs ──
+# Define figure groups: (section_title, section_num, list of (png_pattern, desc_key))
+figure_sections <- list(
+  list(title = "Coverage Overview", num = "3", figures = list(
+    list(pattern = "Fig1_Coverage_BarChart\\.png$", key = "Fig1_Coverage_BarChart")
+  )),
+  list(title = "PTM + Coverage Panel", num = "4", figures = list(
+    list(pattern = "Fig2_Combined_PTM\\.png$", key = "Fig2_Combined_PTM")
+  )),
+  list(title = "Full Proteome Comparison", num = "5", figures = list(
+    list(pattern = "Fig3_Proteome_Comparison\\.png$", key = "Fig3_Proteome_Comparison")
+  ))
+)
+
+figures_added <- 0
+
+for (sec in figure_sections) {
+  report_html <- paste0(report_html, '
+
+  <section class="section">
+    <div class="section-header">
+      <div class="section-number">', sec$num, '</div>
+      <h2>', sec$title, '</h2>
+    </div>')
+
+  for (fig in sec$figures) {
+    matched_pngs <- grep(fig$pattern, all_pngs, value = TRUE)
+    matched_pngs <- sort(matched_pngs)
+
+    desc <- fig_descriptions[[fig$key]]
+    if (is.null(desc)) desc <- list(
+      title = gsub("_", " ", fig$key),
+      method = "See pipeline description above.",
+      interpret = "Compare colored segments across group tracks.")
+
+    for (png_path in matched_pngs) {
+      img_b64 <- png_to_base64(png_path)
+      if (is.null(img_b64)) next
+
+      # Extract gene name from filename for per-protein titles
+      fname <- basename(png_path)
+      gene_in_name <- sub("^Fig[S0-9]+_[A-Za-z]+_", "", sub("\\.png$", "", fname))
+      display_title <- if (nchar(gene_in_name) > 0 && gene_in_name != fname) {
+        paste0(desc$title, " — ", gene_in_name)
+      } else {
+        desc$title
+      }
+
+      report_html <- paste0(report_html, '
+    <div class="plot-container">
+      <div class="plot-title">', display_title, '</div>
+      <img src="data:image/png;base64,', img_b64, '" class="plot-image" alt="', fname, '"/>
+      <div class="method-box">
+        <strong>How it was made:</strong>
+        <p>', desc$method, '</p>
+      </div>
+      <div class="interpret-box">
+        <strong>How to interpret:</strong>
+        <p>', desc$interpret, '</p>
+      </div>
+    </div>')
+      figures_added <- figures_added + 1
+      cat(sprintf("    + Embedded: %s\n", fname))
+    }
+  }
+
+  report_html <- paste0(report_html, '
+  </section>')
+}
+
+# ── Parameters and Output Files ──
+report_html <- paste0(report_html, '
+
+  <section class="section">
+    <div class="section-header">
+      <div class="section-number">7</div>
+      <h2>Analysis Parameters</h2>
+    </div>
+    <table class="param-table">
+      <tr><th>Parameter</th><th>Value</th></tr>
+      <tr><td>Search strategies</td><td>', n_searches, '</td></tr>
+      <tr><td>Experimental groups</td><td>', n_groups, '</td></tr>
+      <tr><td>Minimum coverage threshold</td><td>', MIN_COVERAGE_PCT, '%</td></tr>
+      <tr><td>Proteins selected</td><td>', n_final, '</td></tr>
+      <tr><td>Candidate pool screened</td><td>', n_candidates, '</td></tr>
+      <tr><td>Zero-as-NA</td><td>TRUE</td></tr>
+      <tr><td>Figure DPI</td><td>', PUB_DPI, '</td></tr>
+      <tr><td>FASTA reference</td><td>UniProt Human (reviewed), Oct 28 2025</td></tr>
+    </table>
+  </section>
+
+  <section class="section">
+    <div class="section-header">
+      <div class="section-number">8</div>
+      <h2>Output Files</h2>
+    </div>
+    <table class="param-table">
+      <tr><th>File</th><th>Description</th></tr>
+      <tr><td>sample_group_mapping.csv</td><td>Sample &rarr; group assignments</td></tr>
+      <tr><td>top_proteins_selected.csv</td><td>Selected proteins with mix gain metrics</td></tr>
+      <tr><td>mix_benefit_ranking_all.csv</td><td>Full ranking of all candidates by mix benefit</td></tr>
+      <tr><td>peptide_coverage_ranges_by_group.csv</td><td>Peptide start/end positions per protein &times; group</td></tr>
+      <tr><td>ptm_positions_by_group.csv</td><td>PTM protein positions per group</td></tr>
+      <tr><td>coverage_summary_long.csv</td><td>Coverage % per protein &times; group (long format)</td></tr>
+      <tr><td>coverage_summary_wide.csv</td><td>Coverage % per protein &times; group (wide format)</td></tr>
+      <tr><td>Fig. 1&ndash;3 (PNG + PDF)</td><td>Publication-quality figures at ', PUB_DPI, ' DPI</td></tr>
+      <tr><td>proteins_losing_coverage_with_mix.csv</td><td>Proteins where mix reduces coverage</td></tr>
+      <tr><td>Trypsin2_vs_Mix30_comparison_full_proteome.csv</td><td>Full proteome Trypsin 2 vs Mix 30 coverage</td></tr>
+      <tr><td>Methods_Report.html</td><td>This report (self-contained, all figures embedded)</td></tr>
+    </table>
+  </section>
+
+</div>
+
+<div class="footer">
+  <p><strong>Sequence Coverage Analysis Report</strong></p>
+  <p>R ', R.version$major, '.', R.version$minor,
+  ' &bull; data.table &bull; ggplot2 &bull; Biostrings &bull; patchwork &bull; cowplot</p>
+  <p>Generated ', format(Sys.time(), "%B %d, %Y"), ' &bull; ', figures_added, ' figures embedded</p>
+</div>
+
+</body>
+</html>')
+
+report_path <- file.path(out_dir, "Methods_Report.html")
+writeLines(report_html, report_path)
+cat(sprintf("\n  Saved: Methods_Report.html (%d figures embedded)\n\n", figures_added))
+
+
+# ============================================================================
+# FINAL SUMMARY
+# ============================================================================
+
+cat("\n", strrep("=", 80), "\n", sep = "")
+cat("ANALYSIS COMPLETE\n")
+cat(strrep("=", 80), "\n\n")
+cat("Report folder:", out_dir, "\n\n")
+cat("Generated outputs:\n")
+output_files <- list.files(out_dir, pattern = "\\.(png|pdf|csv|html)$")
+for (f in output_files) cat("  -", f, "\n")
+
+
+cat("\n", strrep("=", 80), "\n", sep = "")
+cat("SESSION INFO\n")
+cat(strrep("=", 80), "\n\n")
+print(sessionInfo())
+```
+
+

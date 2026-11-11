@@ -1,0 +1,41 @@
+cff-version: 1.2.0
+message: "If you use this code, please cite the preprint below."
+title: "Two-Protease-Paper: Protease Quant Advisor and figure scripts"
+license: MIT
+repository-code: "https://github.com/ProteoPulse/Two-Protease-Paper"
+authors:
+  - family-names: Alba
+    given-names: Mario M.
+  - family-names: Bharadwaj
+    given-names: Ajay
+  - family-names: Becker
+    given-names: Lindsey
+  - family-names: Canfield
+    given-names: Ethan J.
+  - family-names: Katz
+    given-names: Jonathan E.
+  - family-names: Van Eyk
+    given-names: Jennifer E.
+  - family-names: Kreimer
+    given-names: Simion
+preferred-citation:
+  type: article
+  title: "Joining Two Perspectives of the Proteome with the Trypsin+HTA Protease Workflow"
+  journal: "bioRxiv"
+  year: 2026
+  doi: "10.64898/2026.10.05.756883"
+  authors:
+    - family-names: Alba
+      given-names: Mario M.
+    - family-names: Bharadwaj
+      given-names: Ajay
+    - family-names: Becker
+      given-names: Lindsey
+    - family-names: Canfield
+      given-names: Ethan J.
+    - family-names: Katz
+      given-names: Jonathan E.
+    - family-names: Van Eyk
+      given-names: Jennifer E.
+    - family-names: Kreimer
+      given-names: Simion

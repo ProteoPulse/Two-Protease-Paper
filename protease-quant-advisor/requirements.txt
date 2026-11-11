@@ -1,0 +1,21 @@
+# Protease Quant Advisor — requirements
+#
+# R packages, not Python. To install them all at once, run:  Rscript install.R
+# (install.R reads this list and installs anything missing from CRAN.)
+#
+# Runtime
+#   R >= 4.5        (tested with R 4.5.2)
+#
+# Engine (required — CLI, tests, and the self-contained HTML report). Tested versions in brackets.
+data.table   # >= 1.15  (1.18.4)
+ggplot2      # >= 3.4   (4.0.3) — uses linewidth=
+yaml         # >= 2.3   (2.3.12)
+base64enc    # >= 0.1   (0.1.6) — embeds figures in report.html
+#
+# GUI only (the Shiny app; not needed for the CLI or the tests)
+shiny        # >= 1.8   (1.14.0)
+DT           # >= 0.30  (0.34.0)
+#
+# No compiled dependencies, no internet access, and no external services are needed at run time.
+# A discovery-scale run (54 samples, ~45k precursors per search) takes ~10 minutes on a laptop, most of
+# it in the Stage 2 split-half resampling; the bundled example takes ~30 s.

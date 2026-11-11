@@ -1,0 +1,76 @@
+# MANIFEST.yml — provenance of the modules in vendor/.
+#
+# These files were copied verbatim from two of our internal analysis frameworks (the concordance
+# framework and the shared-precursor-evidence framework) when the advisor was built (2026-08-24), so
+# the advisor runs on the exact code that produced the earlier results. `md5_source` is the hash of the
+# upstream file; `md5` is the hash of the file shipped here. They differ only where `modified` explains
+# why. Check for drift with:  md5sum vendor/*.R   (or `md5 -r` on macOS)
+copied: 2026-08-24
+files:
+  - file: amplitude.R
+    origin: concordance_framework
+    md5: cf45118df6288966649196198d7581c5
+  - file: benchmark_imputation.R
+    origin: shared_precursor_evidence
+    md5: f21a6d7d4802d8bf05a1c99128fb1e82
+  - file: channel_independence.R
+    origin: shared_precursor_evidence
+    md5: 7ce985dec4239d9b67c33adcc04501aa
+  - file: classify.R
+    origin: concordance_framework
+    md5: c38872af8c6beefe7bef7c2d0d9cfe5f
+  - file: detection.R
+    origin: concordance_framework
+    md5: 32b0fe5ca6f2eb082e226c14ce0fa62f
+  - file: diagnostics_peptide.R
+    origin: concordance_framework
+    md5: 672590a31fc20422683357fcd0e0224b
+  - file: feature_matrix.R
+    origin: concordance_framework
+    md5: 907777ba72d265dba2090799d4a1ceb8
+  - file: harmonize.R
+    origin: concordance_framework
+    md5: b6baf585c421a039f9f758d78fef5727
+  - file: icc.R
+    origin: concordance_framework
+    md5: f93335b10e18f883a9681def0284c0ba
+  - file: precursor_evidence.R
+    origin: shared_precursor_evidence
+    md5: 3c825410146528bd21da766343272590
+  - file: qualify_precursors.R
+    origin: concordance_framework
+    md5: 18c52fc098e760fd07c076b9edcb0050
+  - file: recommend_rollup.R
+    origin: shared_precursor_evidence
+    md5: 78ca394efc83d0f1fc6201691bd0dc2c
+    md5_source: 113e6ae0b2532c6fa80c4d1e775bd0b1
+    modified: "added `selection_mode` (completeness | multi_criteria) so the app reproduces the manuscript's completeness-based channel selection; the weighted vote is unchanged and still reported as vote_channel."
+  - file: reliability.R
+    origin: concordance_framework
+    md5: 53cd8eebe1a80c8955843e187a26a3ec
+  - file: report_stage.R
+    origin: concordance_framework
+    md5: 50f1ec1fbd1c78da48863aee8d08872b
+  - file: rollup_tmp.R
+    origin: concordance_framework
+    md5: 20ce1b6d1c12b3390ab8ea689abfb595
+  - file: seq_coverage.R
+    origin: shared_precursor_evidence
+    md5: 1c001bdd00e2489abfe84937cf0f8b67
+  - file: threshold.R
+    origin: concordance_framework
+    md5: c23b88280e6ceda3656f564ef53edfd1
+  - file: utils_compare.R
+    origin: concordance_framework
+    md5: 7117a1ba33a017f49da1c252cf551568
+  - file: utils_ids.R
+    origin: concordance_framework
+    md5: cee5f83a2e7f2955c9612e5f72ed15ec
+    md5_source: ef04f38674119dedc726a79d86a7dd83
+    modified: "comment-only: example raw-file names use a placeholder donor id (BRH000000)."
+  - file: utils_stats.R
+    origin: concordance_framework
+    md5: 014f2baf865370aaa374434462e776e6
+  - file: validate_recommendation.R
+    origin: shared_precursor_evidence
+    md5: b76c1a2c1d6bfd7ed7d48060631dee94
