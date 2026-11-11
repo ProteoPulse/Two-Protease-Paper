@@ -50,7 +50,8 @@ operational guide.
    ```bash
    export TWO_PROTEASE_DATA=/path/to/search_results    # required
    export TWO_PROTEASE_OUT=$PWD/output                 # optional; default <repo>/output
-   export TWO_PROTEASE_FASTA=/path/to/uniprotkb_Human_AND_reviewed_true_AND_m_2025_10_28.fasta  # 03_, 04_
+   # 03_ and 04_ default to the bundled figure-scripts/reference/uniprotkb_human_reviewed_2025_10_28.fasta.gz
+   # when run from the repository root; set TWO_PROTEASE_FASTA to override
    ```
 3. Run the scripts with `Rscript` from any directory, e.g.
    `Rscript figure-scripts/05_cross_protease/completeness_experiment.R`. Outputs go to

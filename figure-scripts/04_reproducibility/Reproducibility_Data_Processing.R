@@ -81,7 +81,7 @@ ptm_required_samples_for_plot <- 8
 # a protein-position/site column. Set manually or choose interactively.
 # Example: fasta_file <- "C:/path/to/proteome.fasta"
 # TWO_PROTEASE_FASTA = UniProtKB human reviewed proteome (see the repository README).
-fasta_file <- Sys.getenv("TWO_PROTEASE_FASTA", "uniprotkb_Human_AND_reviewed_true_AND_m_2025_10_28.fasta")
+fasta_file <- Sys.getenv("TWO_PROTEASE_FASTA", "figure-scripts/reference/uniprotkb_human_reviewed_2025_10_28.fasta.gz")
 fasta_db <- list(seq_by_accession = list(), seq_by_header = list())
 
 # Minimum number of replicate injections required to calculate intra-day CV.

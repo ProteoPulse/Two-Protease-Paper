@@ -21,7 +21,8 @@ Released as used for the manuscript: only file paths and this introduction were 
 code is untouched. Packages: see the `library()` calls below (several are loaded but unused).
 
 Paths come from environment variables (see the repository README): `TWO_PROTEASE_DATA` (the DIA-NN
-search results, MassIVE MSV000103457), `TWO_PROTEASE_FASTA` (UniProtKB human reviewed proteome) and
+search results, MassIVE MSV000103457), `TWO_PROTEASE_FASTA` (UniProtKB human reviewed proteome; defaults
+to the copy in `figure-scripts/reference/`) and
 `TWO_PROTEASE_OUT` (where figures and tables are written). Render with
 `Rscript -e 'rmarkdown::render("figure-scripts/03_ptm_coverage/sequence_coverage_comparison.Rmd")'`.
 
@@ -129,7 +130,7 @@ search_dirs <- c(
 pg_file <- "report.pg_matrix.tsv"
 pr_file <- "report.pr_matrix.tsv"
 
-fasta_path <- Sys.getenv("TWO_PROTEASE_FASTA", "uniprotkb_Human_AND_reviewed_true_AND_m_2025_10_28.fasta")
+fasta_path <- Sys.getenv("TWO_PROTEASE_FASTA", "figure-scripts/reference/uniprotkb_human_reviewed_2025_10_28.fasta.gz")
 
 TOP_N_PROTEINS       <- 5
 MIN_COVERAGE_PCT     <- 50      # must reach >=50% in at least one group

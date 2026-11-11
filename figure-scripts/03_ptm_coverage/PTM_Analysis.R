@@ -1457,7 +1457,7 @@ plot_triangle_overlap_with_barcodes <- function(
 # Paths come from environment variables (see the repository README): TWO_PROTEASE_DATA = the DIA-NN
 # search results (MassIVE MSV000103457), TWO_PROTEASE_OUT = where reports are written.
 # TWO_PROTEASE_FASTA = UniProtKB human reviewed proteome used for site numbering (see README).
-fasta_path <- Sys.getenv("TWO_PROTEASE_FASTA", "uniprotkb_Human_AND_reviewed_true_AND_m_2025_10_28.fasta")
+fasta_path <- Sys.getenv("TWO_PROTEASE_FASTA", "figure-scripts/reference/uniprotkb_human_reviewed_2025_10_28.fasta.gz")
 # base_dir <- pick_parent_folder()                      # interactive picker (disabled)
 base_dir <- Sys.getenv("TWO_PROTEASE_DATA", "data")   # parent folder of the DIA-NN search folders
 

@@ -12,6 +12,7 @@ protease-quant-advisor/results/
 *.raw
 *.fasta
 *.fasta.gz
+!figure-scripts/reference/*.fasta.gz
 *_Library.tsv*
 
 # R / editor / OS cruft

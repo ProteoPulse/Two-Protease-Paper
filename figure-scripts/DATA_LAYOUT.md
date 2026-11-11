@@ -35,8 +35,9 @@ Notes:
   `250807_..._Plasma_...` (Trypsin 1 / Krakatoa 1). The scripts select runs by these patterns.
 - **Reproducibility run names** are `{day}_{sample}_{replicate}`, e.g. `2_07_5`.
 - **FASTA.** Sequence coverage and PTM site numbering (`03_ptm_coverage`, `04_reproducibility`) use the
-  UniProtKB human reviewed proteome downloaded 2025-10-28
-  (`uniprotkb_Human_AND_reviewed_true_AND_m_2025_10_28.fasta`). Set `TWO_PROTEASE_FASTA` to it.
+  UniProtKB human reviewed proteome downloaded 2025-10-28. It is bundled as
+  `reference/uniprotkb_human_reviewed_2025_10_28.fasta.gz` and is the default when the scripts are run
+  from the repository root; `TWO_PROTEASE_FASTA` overrides it.
   The DIA-NN searches themselves used the FASTA files deposited with the MassIVE dataset.
 - **Libraries.** The combined spectral libraries are not in this repository. They are deposited with
   the MassIVE dataset.
