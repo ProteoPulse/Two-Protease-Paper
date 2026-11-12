@@ -1,0 +1,135 @@
+# config_default.yml — Protease Quant Advisor.
+#
+# Every value here is a DEFAULT and every one is overridable from the app sidebar or the CLI.
+# Where a default was chosen by an experiment rather than by convention, the experiment is named.
+
+seed: 20260824
+label_a: trypsin
+label_b: hta
+
+# ---- ingest -------------------------------------------------------------------------------------
+ingest:
+  run_include: ""        # regex on the normalized run name; "" = keep all runs
+  run_exclude: ""
+  run_sample_regex: ""   # capture group -> biological sample id; "" = one run per sample
+  min_runs_obs: 1        # drop precursors seen in fewer than this many selected runs
+
+# ---- Stage 1: precursor qualification -----------------------------------------------------------
+# Our own rule, applied on top of DIA-NN's 1% q-filtering (which the pr_matrix has already applied
+# and which we cannot loosen — see engine/ingest_matrices.R). Defaults are the "balanced" set chosen
+# from the Aug-19 sensitivity sweep: Exploris median CV ~0.33 and coherence ~0.20 made the stricter
+# 0.30/0.40 pair over-strict on this instrument.
+qualify:
+  detection_rate_min: 0.40
+  median_cv_max: 0.40      # only applies when replicates are present
+  coherence_min: 0.30
+  require_proteotypic: false
+  qvalue_max: null         # not applicable to a pr_matrix input; reported as such
+  sweep:
+    detection_grid: [0.3, 0.4, 0.5, 0.6, 0.7]
+    coherence_grid: [0.2, 0.3, 0.4, 0.5]
+
+# ---- Stage 2: evidence ---------------------------------------------------------------------------
+evidence:
+  splithalf_reps: 200
+  splithalf_min_paired: 6
+  jaccard_min_units: 3
+  lopo_max_features: 30
+
+# ---- the internal roll-up probe ------------------------------------------------------------------
+# A Tukey median polish computed ONLY to grade evidence; its output is never published as quant.
+# Our Aug-2026 ablation found it is 0.91-correlated with peptide
+# count, flips 1.9% of calls and none of the consequential ones, and its depth-independent signal does
+# not predict discordance (p = 0.83 / 0.99). So it is computed and REPORTED as a per-protein
+# diagnostic, and excluded from the score by default.
+probe:
+  enabled: true            # compute LOPO stability + polish SE as diagnostics
+  in_score: false          # do NOT let them vote (set true to restore the Aug-20 behaviour)
+  fragile_quantile: 0.10   # bottom-decile LOPO stability, with >=3 features, raises `fragile_rollup`
+
+# ---- Stage 3: recommendation ---------------------------------------------------------------------
+# HOW the channel is chosen. `completeness` is the manuscript method (see the manuscript Methods): the
+# search that quantified the protein in the larger fraction of samples (mean precursor detection rate)
+# supplies its values, held constant per protein. `multi_criteria` is the more general weighted vote
+# the app offers (weights below) — it agrees with completeness on the clear cases and matters only for
+# the small set of proteins where two channels are comparably complete but differ in precision. Either
+# way the vote is still computed and reported as `vote_channel` / `vote_confidence` / `vote_margin`, and
+# `selection_disagrees_with_vote` flags where the two rules would differ.
+recommend:
+  selection_mode: completeness   # completeness (manuscript default) | multi_criteria (weighted vote)
+  # completeness-mode confidence tiers on the size of the detection-rate gap between the two channels
+  # (an app convenience; the manuscript defines high/moderate/low only for the weighted vote):
+  completeness_high_gap: 0.20     # |detection_rate_a - detection_rate_b| >= this AND winner valid -> high
+  completeness_moderate_gap: 0.05 # ... >= this -> moderate; otherwise low
+  # Weighted head-to-head (used when selection_mode = multi_criteria; always computed for reporting).
+  # Criteria whose metric is missing in either channel leave the numerator AND the denominator, so a
+  # protein judged on 4 criteria is on the same 0-1 scale as one judged on 6.
+  weights:
+    completeness:      2   # protein_detection_rate            (higher wins)
+    depth:             1   # n_features                        (higher wins)
+    coherence:         2   # median_sibling_coherence          (higher wins)
+    self_consistency:  2   # splithalf_reliability             (higher wins)
+    rollup_stability:  1   # LOPO — only used when probe.in_score = true
+    precision:         1   # polish SE — only used when probe.in_score = true
+    technical_cv:      2   # measured CV                       (LOWER wins; needs replicates)
+    replicate_icc:     1   # replicate ICC                     (higher wins; needs replicates)
+  confidence:
+    high_margin: 0.34
+    high_min_criteria: 4
+    moderate_margin: 0.17
+    moderate_min_criteria: 3
+
+# ---- Stage 4: concordance (computed in-app from the PG values) ------------------------------------
+# Needed because the imputation gate depends on whether the two channels agree, and because a
+# recommendation only CHANGES the answer where they disagree.
+concordance:
+  method: kendall          # kendall | spearman
+  min_paired: 15
+  n_perm: 1000
+  null_percentile: 0.99
+  threshold: null          # null = take the null percentile
+
+# ---- Stage 5: optional protein-level imputation ---------------------------------------------------
+# Fill gaps in the recommended channel from the other protease's measurement of the same protein in
+# the same injection. Defaults set by the Aug-24 benchmark.
+impute:
+  enabled: false           # opt-in: on this data it fires on very few cells, by design
+  offset_model: protein_median  # the method described in the manuscript: donor + the protein's median
+                           # log2(recipient - donor) over co-observed samples. sample_knn (offset from
+                           # the k nearest co-observed samples) is the benchmarked alternative: ~0.04
+                           # log2 more accurate on discovery (paired p 3.5e-07 / 1.0e-08), near-identical
+                           # on replicate data.
+                           # protein_lm is deliberately NOT offered: best under MCAR, among the worst
+                           # under MNAR, because imputation extrapolates into the censored tail.
+  knn_k: 10
+  min_paired_offset: 8
+  entry:
+    min_completeness_donor: 0.60   # donor must actually measure the protein
+    max_completeness_recipient: 0.999  # nothing to do if the recipient is already complete
+  gates:
+    ccc_min: 0.50
+    tau_min: 0.30
+    offset_mad_max: 1.0
+  block_classes: [discordant]      # a disagreeing donor is not a surrogate. Not a tuning knob.
+  allow_borrowed_offsets: false    # Aug-24: 1.10-1.12 log2 (4.53 on gap-bearing) — worse than missing
+
+# ---- Stage 6: reproducibility / well-quantified counts -------------------------------------------
+# How many proteins are WELL QUANTIFIED, per protease and as the union, before/after imputation.
+# The stage PICKS THE METRIC for the data: corrected inter-day CV when replicates + a day map are
+# present (the reproducibility cohort), otherwise cohort completeness (the discovery cohort, where
+# inter-day CV is undefined). Combined is always the UNION; the two proteases are never averaged.
+reproducibility:
+  run_day_regex: ""        # regex whose FIRST group captures a preparation-day label from the run
+                           # name; "" = no day map. With replicates + a day map -> corrected
+                           # inter-day CV; with replicates but no map -> between-replicate SD;
+                           # with no replicates -> completeness. Repro cohort ('Day_Sample_Rep'
+                           # run names): "^([0-9]+)_.*$".
+  cv_threshold: 20         # % CV below which a protein x sample is "well quantified" (CV modes).
+                           # Corrected inter-day CV = between-day SD in log2 with injection noise
+                           # removed via variance components, expressed as a CV; the published linear
+                           # day-mean CV is also reported for continuity with the published panel.
+  completeness_min: 0.50   # completeness mode: fraction of a condition's runs a protein must be
+                           # quantified in to count as well quantified.
+
+# ---- optional -------------------------------------------------------------------------------------
+fasta: ""                  # enables sequence-coverage criteria; blank = those criteria drop out
