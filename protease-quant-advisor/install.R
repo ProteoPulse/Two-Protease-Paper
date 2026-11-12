@@ -22,8 +22,13 @@ if (rv < "4.5")
 have    <- rownames(installed.packages())
 missing <- setdiff(want, have)
 if (length(missing)) {
-  cat(sprintf("Installing from CRAN: %s\n", paste(missing, collapse = ", ")))
-  install.packages(missing, repos = "https://cloud.r-project.org")
+  # use the repository already configured (e.g. a local mirror or Posit Package Manager binaries);
+  # fall back to the CRAN cloud mirror if none is set
+  repos <- getOption("repos")
+  if (is.null(repos) || !length(repos) || any(repos %in% c("@CRAN@", "")))
+    repos <- c(CRAN = "https://cloud.r-project.org")
+  cat(sprintf("Installing from %s: %s\n", repos[[1]], paste(missing, collapse = ", ")))
+  install.packages(missing, repos = repos)
 } else {
   cat("All required packages are already installed.\n")
 }
